@@ -85,16 +85,6 @@ def init_db():
                   location TEXT, 
                   status TEXT DEFAULT 'Active')''')
 
-    c.execute('''CREATE TABLE IF NOT EXISTS coupons
-                 (code TEXT PRIMARY KEY, 
-                  discount_type TEXT, 
-                  value REAL, 
-                  min_bill REAL, 
-                  valid_until TEXT, 
-                  usage_limit INTEGER, 
-                  used_count INTEGER DEFAULT 0,
-                  bound_mobile TEXT)''')
-                  
     c.execute('''CREATE TABLE IF NOT EXISTS lucky_draw_history
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
                   date TEXT,
@@ -158,8 +148,11 @@ def log_activity(user, action, details):
     conn.close()
 
 def process_sale_transaction(cart_items, total, mode, operator, pos_id, customer_mobile, 
-                             tax_amount, discount_amount, coupon_code, points_redeemed, 
+                             tax_amount, points_redeemed, 
                              points_earned, integrity_hash, time_taken):
+    """
+    Removed coupon_code and discount_amount as they are no longer supported.
+    """
     conn = get_connection()
     c = conn.cursor()
     sale_id = None
@@ -167,18 +160,16 @@ def process_sale_transaction(cart_items, total, mode, operator, pos_id, customer
         for item in cart_items:
             c.execute("UPDATE products SET stock = stock - 1, sales_count = sales_count + 1 WHERE id=?", (item['id'],))
         
-        if coupon_code:
-            c.execute("UPDATE coupons SET used_count = used_count + 1 WHERE code=?", (coupon_code,))
-
         items_json = json.dumps([i['id'] for i in cart_items])
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
+        # Insert with 0 discount and NULL coupon
         c.execute("""INSERT INTO sales (timestamp, total_amount, items_json, integrity_hash, 
                      operator, payment_mode, time_taken, pos_id, customer_mobile, 
                      tax_amount, discount_amount, coupon_applied, points_redeemed) 
-                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                     VALUES (?,?,?,?,?,?,?,?,?,?,0.0,NULL,?)""",
                 (timestamp, total, items_json, integrity_hash, operator, mode, time_taken, 
-                 pos_id, customer_mobile, tax_amount, discount_amount, coupon_code, points_redeemed))
+                 pos_id, customer_mobile, tax_amount, points_redeemed))
         sale_id = c.lastrowid
 
         if customer_mobile:
@@ -340,67 +331,6 @@ def verify_password(username, password):
     conn.close()
     return res is not None
 
-def create_coupon(code, dtype, value, min_bill, days_valid, limit, bound_mobile=None):
-    valid_until = (datetime.now() + timedelta(days=days_valid)).strftime("%Y-%m-%d")
-    conn = get_connection()
-    c = conn.cursor()
-    try:
-        c.execute("INSERT INTO coupons (code, discount_type, value, min_bill, valid_until, usage_limit, bound_mobile) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                  (code, dtype, value, min_bill, valid_until, limit, bound_mobile))
-        conn.commit()
-        return True
-    except: return False
-    finally: conn.close()
-
-def get_coupon(code, customer_mobile=None):
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("SELECT * FROM coupons WHERE code=?", (code,))
-    c_data = c.fetchone()
-    conn.close()
-    if c_data:
-        # columns: 0:code, 1:type, 2:value, 3:min, 4:expiry, 5:limit, 6:used, 7:bound_mobile
-        expiry = c_data[4]
-        limit = c_data[5]
-        used = c_data[6]
-        bound_mobile = c_data[7] if len(c_data) > 7 else None
-        
-        if datetime.now() > datetime.strptime(expiry, "%Y-%m-%d"):
-            return None, "Expired"
-        if used >= limit:
-            return None, "Usage Limit Reached"
-        
-        if bound_mobile and bound_mobile != 'None' and bound_mobile != '':
-             if not customer_mobile:
-                 return None, "Customer identification required for this coupon"
-             if bound_mobile.strip() != customer_mobile.strip():
-                 return None, "Coupon not valid for this customer"
-        
-        return {
-            "code": c_data[0], "type": c_data[1], "value": c_data[2],
-            "min_bill": c_data[3], "bound_mobile": bound_mobile, "expiry": expiry
-        }, "Valid"
-    return None, "Invalid Code"
-
-def get_customer_coupons(mobile):
-    if not mobile: return pd.DataFrame()
-    conn = get_connection()
-    now_str = datetime.now().strftime("%Y-%m-%d")
-    query = """
-    SELECT code, discount_type, value, min_bill, valid_until 
-    FROM coupons 
-    WHERE bound_mobile = ? AND valid_until >= ? AND used_count < usage_limit
-    """
-    df = pd.read_sql(query, conn, params=(mobile, now_str))
-    conn.close()
-    return df
-
-def get_all_coupons():
-    conn = get_connection()
-    df = pd.read_sql("SELECT * FROM coupons", conn)
-    conn.close()
-    return df
-
 def pick_lucky_winner(lookback_days, min_spend, prize_desc):
     conn = get_connection()
     c = conn.cursor()
@@ -411,7 +341,7 @@ def pick_lucky_winner(lookback_days, min_spend, prize_desc):
     query = """
     SELECT customer_mobile, SUM(total_amount) as spent 
     FROM sales 
-    WHERE timestamp >= ? AND customer_mobile IS NOT NULL 
+    WHERE timestamp >= ? AND customer_mobile IS NOT NULL AND status != 'Cancelled'
     GROUP BY customer_mobile 
     HAVING spent >= ?
     """
