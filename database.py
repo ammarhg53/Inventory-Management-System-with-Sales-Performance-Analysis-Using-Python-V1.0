@@ -66,10 +66,6 @@ def init_db():
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT, 
                   user TEXT, action TEXT, details TEXT)''')
     
-    # Kept for compatibility, though simplified login used
-    c.execute('''CREATE TABLE IF NOT EXISTS active_sessions
-                 (pos_id TEXT PRIMARY KEY, username TEXT, login_time TEXT, role TEXT)''')
-
     c.execute('''CREATE TABLE IF NOT EXISTS customers
                  (mobile TEXT PRIMARY KEY, 
                   name TEXT, 
@@ -115,12 +111,6 @@ def init_db():
         ph = hashlib.sha256(p.encode()).hexdigest()
         c.execute("INSERT OR REPLACE INTO users (username, password_hash, role, full_name, status) VALUES (?, ?, ?, ?, 'Active')", (u, ph, r, n))
 
-    terminals = [
-        ('POS-1', 'Main Counter', 'Entrance', 'Active')
-    ]
-    for t_id, t_name, t_loc, t_stat in terminals:
-        c.execute("INSERT OR IGNORE INTO terminals (id, name, location, status) VALUES (?, ?, ?, ?)", (t_id, t_name, t_loc, t_stat))
-
     conn.commit()
     conn.close()
 
@@ -151,7 +141,7 @@ def process_sale_transaction(cart_items, total, mode, operator, pos_id, customer
                              tax_amount, points_redeemed, 
                              points_earned, integrity_hash, time_taken):
     """
-    Removed coupon_code and discount_amount as they are no longer supported.
+    Removed integrity logic, only stores values.
     """
     conn = get_connection()
     c = conn.cursor()
@@ -185,7 +175,8 @@ def process_sale_transaction(cart_items, total, mode, operator, pos_id, customer
                 elif new_spend > 10000: new_seg = "Regular"
                 else: new_seg = "Occasional"
                 
-                new_points = curr_points + points_earned - points_redeemed
+                # Update points (if any logic remained, but now stripped)
+                new_points = curr_points 
                 c.execute("""UPDATE customers SET visits = visits + 1, total_spend = ?, 
                              loyalty_points = ?, segment = ? WHERE mobile=?""", 
                           (new_spend, new_points, new_seg, customer_mobile))
@@ -211,20 +202,25 @@ def cancel_sale_transaction(sale_id, operator, role, reason, password):
         if not c.fetchone():
             return False, "Invalid Password. Identity verification failed."
 
-        c.execute("SELECT items_json, status, operator, total_amount, timestamp FROM sales WHERE id=?", (sale_id,))
+        c.execute("SELECT items_json, status, operator, total_amount, timestamp, customer_mobile FROM sales WHERE id=?", (sale_id,))
         res = c.fetchone()
         if not res:
             return False, "Sale ID not found"
         
-        items_json_str, status, sale_operator, total_amount, sale_timestamp_str = res
+        items_json_str, status, sale_operator, total_amount, sale_timestamp_str, cust_mobile = res
         
         if status == 'Cancelled':
             return False, "Sale already cancelled"
             
         items_ids = json.loads(items_json_str)
+        # Restore stock
         for pid in items_ids:
             c.execute("UPDATE products SET stock = stock + 1, sales_count = sales_count - 1 WHERE id=?", (pid,))
-            
+        
+        # Adjust customer spend if linked
+        if cust_mobile:
+            c.execute("UPDATE customers SET total_spend = total_spend - ? WHERE mobile=?", (total_amount, cust_mobile))
+
         cancel_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         c.execute("""UPDATE sales SET status = 'Cancelled', cancellation_reason = ?, cancelled_by = ?, cancellation_timestamp = ? 
                      WHERE id=?""", (reason, operator, cancel_time, sale_id))
@@ -480,33 +476,72 @@ def seed_advanced_demo_data():
         c.execute("INSERT OR REPLACE INTO users (username, password_hash, role, full_name, status) VALUES (?, ?, ?, ?, 'Active')", (u, ph, r, n))
 
     demo_customers = [
-        ("9876500001", "Amit Sharma", "amit.s@example.com", "Regular"),
-        ("9876500002", "Priya Singh", "priya.s@example.com", "High-Value"),
-        ("9876500003", "Rahul Verma", "rahul.v@example.com", "Occasional")
+        ("+919876500001", "Amit Sharma", "amit.s@example.com", "Regular"),
+        ("+919876500002", "Priya Singh", "priya.s@example.com", "High-Value"),
+        ("+919876500003", "Rahul Verma", "rahul.v@example.com", "Occasional")
     ]
     for mob, name, email, seg in demo_customers:
         c.execute("INSERT OR IGNORE INTO customers (mobile, name, email, segment, visits, total_spend, loyalty_points) VALUES (?, ?, ?, ?, 0, 0, 0)", 
                   (mob, name, email, seg))
 
+    # Seed Dummy Sales Data if empty
+    c.execute("SELECT count(*) FROM sales")
+    if c.fetchone()[0] < 10:
+        c.execute("SELECT id, price FROM products")
+        prods = c.fetchall()
+        if prods:
+            modes = ["Cash", "UPI", "Card"]
+            operators = ["admin", "operator"]
+            
+            for _ in range(50):
+                # Random Date in last 30 days
+                days_ago = random.randint(0, 30)
+                txn_time = (datetime.now() - timedelta(days=days_ago)).strftime("%Y-%m-%d %H:%M:%S")
+                
+                # Random items (1 to 5 items)
+                num_items = random.randint(1, 5)
+                chosen = random.choices(prods, k=num_items)
+                items_json = json.dumps([x[0] for x in chosen])
+                total = sum([x[1] for x in chosen])
+                
+                mode = random.choice(modes)
+                op = random.choice(operators)
+                # Random customer or None
+                cust_mob = random.choice(demo_customers)[0] if random.random() > 0.3 else None
+                
+                c.execute("""INSERT INTO sales (timestamp, total_amount, items_json, integrity_hash, 
+                            operator, payment_mode, time_taken, pos_id, customer_mobile, 
+                            tax_amount, discount_amount, coupon_applied, points_redeemed) 
+                            VALUES (?,?,?, 'DUMMY', ?, ?, 30, 'POS-1', ?, 0, 0, NULL, 0)""",
+                        (txn_time, total, items_json, op, mode, cust_mob))
+
     conn.commit()
     conn.close()
 
 def get_transaction_history(filters=None):
-    query = "SELECT id, timestamp, total_amount, payment_mode, operator, customer_mobile, status, pos_id, integrity_hash FROM sales WHERE 1=1"
+    # Added Left Join to get customer name/email/mobile for display
+    query = """
+        SELECT s.id, s.timestamp, s.total_amount, s.payment_mode, s.operator, 
+               s.customer_mobile, s.status, s.pos_id, s.integrity_hash,
+               c.name as customer_name, c.email as customer_email
+        FROM sales s
+        LEFT JOIN customers c ON s.customer_mobile = c.mobile
+        WHERE 1=1
+    """
     params = []
     
     if filters:
         if filters.get('bill_no'):
-            query += " AND id = ?"
+            query += " AND s.id = ?"
             params.append(filters['bill_no'])
         if filters.get('operator'):
-            query += " AND operator LIKE ?"
+            query += " AND s.operator LIKE ?"
             params.append(f"%{filters['operator']}%")
         if filters.get('date'):
-            query += " AND timestamp LIKE ?"
+            query += " AND s.timestamp LIKE ?"
             params.append(f"{filters['date']}%")
             
-    query += " ORDER BY id DESC"
+    query += " ORDER BY s.id DESC"
     
     conn = get_connection()
     try:
@@ -568,6 +603,30 @@ def add_category(name):
     c = conn.cursor()
     try:
         c.execute("INSERT INTO categories (name) VALUES (?)", (name,))
+        conn.commit()
+        return True
+    except:
+        return False
+    finally:
+        conn.close()
+
+def delete_category(name):
+    conn = get_connection()
+    c = conn.cursor()
+    try:
+        c.execute("DELETE FROM categories WHERE name=?", (name,))
+        conn.commit()
+        return True
+    except:
+        return False
+    finally:
+        conn.close()
+
+def rename_category(old_name, new_name):
+    conn = get_connection()
+    c = conn.cursor()
+    try:
+        c.execute("UPDATE categories SET name=? WHERE name=?", (new_name, old_name))
         conn.commit()
         return True
     except:
