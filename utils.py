@@ -43,9 +43,9 @@ def check_password_strength(password):
 def validate_email(email):
     """
     Validates email format using Regex.
+    Returns True if valid or if email is empty (optional field), False otherwise.
     """
-    if not email: return False
-    # Basic format: chars + @ + chars + . + chars
+    if not email: return True # Optional field
     pattern = r'^[\w\.-]+@[\w\.-]+\.\w+$'
     return re.match(pattern, email) is not None
 
@@ -63,7 +63,7 @@ def validate_mobile_number(number_str, country_code):
     if country_code == "+91": # India
         if len(clean_num) != 10:
             return False, None, "India (+91) numbers must be exactly 10 digits."
-        if int(clean_num[0]) < 6:
+        if clean_num[0] not in ['6', '7', '8', '9']:
             return False, None, "India (+91) numbers must start with 6, 7, 8, or 9."
             
     elif country_code == "+971": # UAE
@@ -72,24 +72,16 @@ def validate_mobile_number(number_str, country_code):
         if not clean_num.startswith("5"):
             return False, None, "UAE (+971) numbers must start with 5."
             
-    elif country_code == "+965": # Kuwait
-        if len(clean_num) != 8:
-            return False, None, "Kuwait (+965) numbers must be exactly 8 digits."
-        if clean_num[0] not in ['5', '6', '9']:
-            return False, None, "Kuwait (+965) numbers must start with 5, 6, or 9."
-            
-    elif country_code == "+966": # Saudi Arabia
-        if len(clean_num) != 9:
-            return False, None, "Saudi Arabia (+966) numbers must be exactly 9 digits."
-        if not clean_num.startswith("5"):
-            return False, None, "Saudi Arabia (+966) numbers must start with 5."
-            
     elif country_code == "+1": # USA
         if len(clean_num) != 10:
             return False, None, "USA (+1) numbers must be exactly 10 digits."
         if clean_num[0] in ['0', '1']:
             return False, None, "USA (+1) area code cannot start with 0 or 1."
             
+    elif country_code == "+44": # UK
+        if len(clean_num) < 10 or len(clean_num) > 11:
+             return False, None, "UK (+44) numbers must be 10-11 digits."
+
     # E.164 Normalization
     normalized = f"{country_code}{clean_num}"
     return True, normalized, "Valid"
@@ -119,8 +111,8 @@ def generate_hash(data_string):
     return hashlib.sha256(data_string.encode()).hexdigest()
 
 def generate_integrity_hash(txn_data):
-    raw_string = f"{txn_data[0]}|{txn_data[1]}|{txn_data[2]}|{txn_data[3]}"
-    return hashlib.sha256(raw_string.encode()).hexdigest()
+    # Logic removed, returning dummy to prevent breaking legacy calls
+    return "DISABLED"
 
 # --- TRIE ---
 class TrieNode:
@@ -366,7 +358,7 @@ class PDFReceipt(FPDF):
         self.set_font('Arial', 'B', 15)
         self.cell(0, 10, self.store_name, 0, 1, 'C')
         self.set_font('Arial', '', 9)
-        self.cell(0, 5, 'Retail & POS System', 0, 1, 'C')
+        self.cell(0, 5, 'Professional Retail Invoice', 0, 1, 'C')
         self.ln(5)
 
     def footer(self):
@@ -388,11 +380,9 @@ def generate_receipt_pdf(store_name, txn_id, time_str, items, total, operator, m
         text = text.replace("₹", "Rs. ")
         return text.encode('latin-1', 'replace').decode('latin-1')
 
-    pdf.cell(100, 6, clean_text(f"Receipt No: #{txn_id}"), 0, 0)
+    pdf.cell(100, 6, clean_text(f"Order No: #{txn_id}"), 0, 0)
     pdf.cell(0, 6, clean_text(f"Date: {time_str}"), 0, 1, 'R')
-    pdf.cell(100, 6, clean_text(f"Cashier: {operator}"), 0, 0)
-    pdf.cell(0, 6, clean_text(f"POS: {pos}"), 0, 1, 'R')
-    pdf.cell(100, 6, clean_text(f"Payment Mode: {mode}"), 0, 1, 'L')
+    pdf.cell(100, 6, clean_text(f"Cashier: {operator}"), 0, 1, 'L')
     
     if customer:
         pdf.ln(5)
@@ -400,11 +390,12 @@ def generate_receipt_pdf(store_name, txn_id, time_str, items, total, operator, m
         pdf.cell(0, 6, "Customer Details:", 0, 1, 'L')
         pdf.set_font("Arial", '', 10)
         pdf.cell(0, 5, clean_text(f"Name: {customer.get('name', 'N/A')}"), 0, 1)
+        pdf.cell(0, 5, clean_text(f"Email: {customer.get('email', 'N/A')}"), 0, 1)
         pdf.cell(0, 5, clean_text(f"Mobile: {customer.get('mobile', 'N/A')}"), 0, 1)
 
     pdf.ln(5)
     
-    pdf.set_fill_color(220, 220, 220)
+    pdf.set_fill_color(240, 240, 240)
     pdf.set_font("Arial", 'B', 10)
     pdf.cell(100, 8, "Item", 1, 0, 'L', True)
     pdf.cell(30, 8, "Price", 1, 0, 'C', True)
