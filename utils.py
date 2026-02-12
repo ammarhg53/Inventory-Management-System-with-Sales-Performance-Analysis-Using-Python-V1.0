@@ -86,32 +86,13 @@ def validate_mobile_number(number_str, country_code):
     normalized = f"{country_code}{clean_num}"
     return True, normalized, "Valid"
 
-# --- LOYALTY ---
-def calculate_loyalty_points(amount):
-    return int(amount // 100)
 
-def get_sound_html(sound_type):
-    if sound_type == 'success':
-        src = "https://www.soundjay.com/buttons/sounds/button-3.mp3"
-    elif sound_type == 'error':
-        src = "https://www.soundjay.com/buttons/sounds/button-10.mp3"
-    elif sound_type == 'celebration':
-        # Short cheer/tada sound
-        src = "https://www.soundjay.com/human/sounds/applause-01.mp3"
-    else: 
-        src = "https://www.soundjay.com/buttons/sounds/button-16.mp3"
-        
-    return f"""
-    <audio autoplay>
-        <source src="{src}" type="audio/mpeg">
-    </audio>
-    """
+
 
 def generate_hash(data_string):
     return hashlib.sha256(data_string.encode()).hexdigest()
 
 def generate_integrity_hash(txn_data):
-    # Logic removed, returning dummy to prevent breaking legacy calls
     return "DISABLED"
 
 # --- TRIE ---
