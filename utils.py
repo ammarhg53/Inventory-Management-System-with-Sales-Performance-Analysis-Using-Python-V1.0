@@ -39,6 +39,15 @@ def check_password_strength(password):
     elif score == 4: return 4, "Very Strong", "#059669"
     return 0, "Unknown", "#ef4444"
 
+# --- EMAIL VALIDATION ---
+def validate_email(email):
+    """
+    Validates email format using Regex.
+    """
+    if not email: return False
+    pattern = r'^[\w\.-]+@[\w\.-]+\.\w+$'
+    return re.match(pattern, email) is not None
+
 # --- MOBILE VALIDATION (COUNTRY SPECIFIC) ---
 def validate_mobile_number(number_str, country_code):
     """
@@ -263,7 +272,7 @@ def calculate_profit_loss(df_sales, df_products):
     """
     Calculates P&L for Enhanced Statement.
     Gross Revenue = Sum of List Prices of sold items
-    Marketing Expense = Discounts + Points Value
+    Marketing Expense = Only Loyalty Points (Discounts Removed)
     Net Revenue = Gross Revenue - Marketing Expense
     Profit = Net Revenue - COGS
     """
@@ -275,12 +284,9 @@ def calculate_profit_loss(df_sales, df_products):
     else:
         active_sales = df_sales
 
-    total_discount_given = active_sales['discount_amount'].sum() if 'discount_amount' in active_sales.columns else 0
+    # Discounts removed, only loyalty points count as marketing expense
     total_loyalty_redeemed = active_sales['points_redeemed'].sum() if 'points_redeemed' in active_sales.columns else 0
-    # Add coupon discount from `coupon_applied`? logic assumed handled in total amount reduction usually, 
-    # but `discount_amount` column should capture it.
-    
-    marketing_expense = total_discount_given + total_loyalty_redeemed
+    marketing_expense = total_loyalty_redeemed
 
     prod_map = df_products.set_index('id')[['name', 'category', 'cost_price', 'price']].to_dict('index')
     
@@ -300,7 +306,7 @@ def calculate_profit_loss(df_sales, df_products):
                     gross_rev += sp # Gross is sum of list prices
                     total_cost += cp
                     
-                    # Category breakdown is based on Gross Profit (List Price - Cost) for visualization simplicity
+                    # Category breakdown
                     profit_gross = sp - cp
                     
                     cat = p['category']
