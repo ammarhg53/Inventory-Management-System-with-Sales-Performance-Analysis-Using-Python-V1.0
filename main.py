@@ -461,8 +461,8 @@ def finalize_sale(total, mode):
 
 def inventory_manager():
     st.title("📦 Inventory Management")
-    # Tab 1 renamed from View & Edit to View
-    tab_view, tab_add = st.tabs(["View Stock", "Add New Product"])
+    # Tab 1 renamed from View & Edit to View. Added Restock Product tab.
+    tab_view, tab_add, tab_restock = st.tabs(["View Stock", "Add New Product", "Restock Product"])
     
     conn = db.get_connection()
     df = pd.read_sql("SELECT * FROM products", conn)
@@ -543,6 +543,31 @@ def inventory_manager():
                         st.rerun()
                     else: 
                         st.error("Error adding product to database.")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with tab_restock:
+        st.markdown("<div class='card-container'>", unsafe_allow_html=True)
+        st.subheader("➕ Restock Inventory")
+        
+        if df.empty:
+            st.info("No products available to restock.")
+        else:
+            # Map for selection
+            prod_map = {f"{row['name']} (Stock: {row['stock']})": row['id'] for i, row in df.iterrows()}
+            
+            with st.form("restock_frm"):
+                sel_p = st.selectbox("Select Product", list(prod_map.keys()))
+                add_qty = st.number_input("Additional Quantity", min_value=1, step=1)
+                
+                if st.form_submit_button("Restock Product"):
+                    if add_qty <= 0:
+                        st.error("Quantity must be positive.")
+                    else:
+                        pid = prod_map[sel_p]
+                        db.restock_product(pid, add_qty)
+                        st.success("Product restocked successfully")
+                        time.sleep(1)
+                        st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
 
 def analytics_dashboard():
