@@ -243,10 +243,32 @@ def rank_products(df_sales, df_products):
         
     return pd.DataFrame(ranking_data)
 
+def get_product_performance_lists(df_sales, df_products):
+    if df_sales.empty: return [], [], []
+    
+    df_rank = rank_products(df_sales, df_products)
+    if df_rank.empty: return [], [], []
+    
+    # Logic: High = Top 10% sold, Low = Bottom 10% sold, Star = High Rev
+    high = df_rank.head(5)['name'].tolist()
+    low = df_rank.tail(5)['name'].tolist()
+    
+    df_rank = df_rank.sort_values('revenue', ascending=False)
+    star = df_rank.head(3)['name'].tolist()
+    
+    return high, low, star
+
 # --- PROFIT & LOSS ANALYSIS ---
 def calculate_profit_loss(df_sales, df_products):
+    """
+    Calculates P&L for Enhanced Statement.
+    Gross Revenue = Sum of List Prices of sold items
+    Marketing Expense = Discounts + Points Value
+    Net Revenue = Gross Revenue - Marketing Expense
+    Profit = Net Revenue - COGS
+    """
     if df_sales.empty or df_products.empty:
-        return {"net_profit": 0, "total_revenue": 0, "total_cost": 0, "margin_percent": 0, "marketing_expense": 0}, pd.DataFrame()
+        return {"net_profit": 0, "total_revenue": 0, "total_cost": 0, "margin_percent": 0, "marketing_expense": 0, "net_revenue": 0}, pd.DataFrame()
 
     if 'status' in df_sales.columns:
         active_sales = df_sales[df_sales['status'] != 'Cancelled']
@@ -255,6 +277,9 @@ def calculate_profit_loss(df_sales, df_products):
 
     total_discount_given = active_sales['discount_amount'].sum() if 'discount_amount' in active_sales.columns else 0
     total_loyalty_redeemed = active_sales['points_redeemed'].sum() if 'points_redeemed' in active_sales.columns else 0
+    # Add coupon discount from `coupon_applied`? logic assumed handled in total amount reduction usually, 
+    # but `discount_amount` column should capture it.
+    
     marketing_expense = total_discount_given + total_loyalty_redeemed
 
     prod_map = df_products.set_index('id')[['name', 'category', 'cost_price', 'price']].to_dict('index')
@@ -272,8 +297,10 @@ def calculate_profit_loss(df_sales, df_products):
                     cp = p['cost_price']
                     sp = p['price']
                     
-                    gross_rev += sp
+                    gross_rev += sp # Gross is sum of list prices
                     total_cost += cp
+                    
+                    # Category breakdown is based on Gross Profit (List Price - Cost) for visualization simplicity
                     profit_gross = sp - cp
                     
                     cat = p['category']
