@@ -186,14 +186,18 @@ def pos_interface():
             if st.session_state.get('temp_new_customer') and not st.session_state.get('current_customer'):
                 st.markdown("##### 📝 New Customer Details")
                 with st.form("new_cust_form"):
-                    new_name = st.text_input("Full Name")
-                    new_email = st.text_input("Email (Mandatory)")
+                    new_name = st.text_input("Full Name (Mandatory)")
+                    new_email = st.text_input("Email ID (Mandatory)")
+                    
                     if st.form_submit_button("Save Customer"):
                         if not new_name:
-                            st.error("Name is required.")
-                        elif not new_email or not utils.validate_email(new_email):
+                            st.error("Customer Name is mandatory.")
+                        elif not new_email:
+                            st.error("Customer Email is mandatory.")
+                        elif not utils.validate_email(new_email):
                             st.error("Please enter a valid email address.")
                         else:
+                            # Save Name and Email only (using mobile as ID from search)
                             db.upsert_customer(st.session_state['temp_new_customer'], new_name, new_email)
                             st.session_state['current_customer'] = db.get_customer(st.session_state['temp_new_customer'])
                             st.session_state.pop('temp_new_customer', None)
@@ -268,11 +272,12 @@ def pos_interface():
                 
                 raw_total = summary['Total'].sum()
                 
-                # Discounts/Coupons Removed
+                # No Loyalty, No Coupons
                 discount = 0
                 fest_disc = 0 
-
-                total_after_disc = max(0, raw_total - discount - fest_disc - st.session_state['points_to_redeem'])
+                
+                # No Points Redemption
+                total_after_disc = max(0, raw_total - discount - fest_disc)
                 
                 gst_enabled = db.get_setting("gst_enabled") == 'True'
                 tax_amount = 0.0
@@ -309,7 +314,7 @@ def pos_interface():
                                 "total": final_total, 
                                 "tax": tax_amount, 
                                 "discount": discount + fest_disc,
-                                "points": st.session_state['points_to_redeem']
+                                "points": 0
                             }
                             st.session_state['checkout_stage'] = 'payment_method'
                             st.rerun()
@@ -556,6 +561,7 @@ def analytics_dashboard():
         
         c1, c2, c3, c4, c5 = st.columns(5)
         c1.metric("Gross Revenue", f"{currency}{pl_summary['total_revenue']:,.2f}")
+        # Marketing Exp is always 0
         c2.metric("Marketing Exp", f"{currency}{pl_summary['marketing_expense']:,.2f}")
         c3.metric("Net Revenue", f"{currency}{pl_summary['net_revenue']:,.2f}")
         c4.metric("Net Profit", f"{currency}{pl_summary['net_profit']:,.2f}")
@@ -608,7 +614,11 @@ def analytics_dashboard():
     # --- 6. PAYMENT METHOD ---
     with st.expander("🔽 💳 Payment Method Analysis"):
         if not filtered_sales.empty:
-            pay_dist = filtered_sales['payment_mode'].value_counts()
+            # Filter for only allowed methods just in case old data exists
+            allowed_methods = ['Cash', 'UPI', 'Card']
+            mask = filtered_sales['payment_mode'].isin(allowed_methods)
+            pay_dist = filtered_sales.loc[mask, 'payment_mode'].value_counts()
+            
             fig, ax = plt.subplots(figsize=(4,4))
             ax.pie(pay_dist, labels=pay_dist.index, autopct='%1.1f%%')
             st.pyplot(fig)
@@ -639,19 +649,7 @@ def analytics_dashboard():
             plt.legend()
             st.pyplot(fig)
 
-    # --- 8. PRODUCT PERF ---
-    with st.expander("🔽 ⭐ Product Performance"):
-        high, low, star = utils.get_product_performance_lists(filtered_sales, df_prods)
-        c1, c2, c3 = st.columns(3)
-        with c1: 
-            st.success("⭐ High Performers")
-            for p in high: st.write(f"• {p}")
-        with c2:
-            st.error("⚠️ Low Performers")
-            for p in low: st.write(f"• {p}")
-        with c3:
-            st.warning("🌟 Star Performers")
-            for p in star: st.write(f"• {p}")
+    # --- 8. REMOVED (Rankings/Product Performance) ---
 
     # --- 9. CATEGORY PERF ANALYSIS ---
     with st.expander("🔽 📊 Category Performance Analysis"):
