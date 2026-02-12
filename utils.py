@@ -45,6 +45,7 @@ def validate_email(email):
     Validates email format using Regex.
     """
     if not email: return False
+    # Basic format: chars + @ + chars + . + chars
     pattern = r'^[\w\.-]+@[\w\.-]+\.\w+$'
     return re.match(pattern, email) is not None
 
@@ -272,8 +273,8 @@ def calculate_profit_loss(df_sales, df_products):
     """
     Calculates P&L for Enhanced Statement.
     Gross Revenue = Sum of List Prices of sold items
-    Marketing Expense = Only Loyalty Points (Discounts Removed)
-    Net Revenue = Gross Revenue - Marketing Expense
+    Marketing Expense = 0 (Fixed Rule)
+    Net Revenue = Gross Revenue
     Profit = Net Revenue - COGS
     """
     if df_sales.empty or df_products.empty:
@@ -284,9 +285,8 @@ def calculate_profit_loss(df_sales, df_products):
     else:
         active_sales = df_sales
 
-    # Discounts removed, only loyalty points count as marketing expense
-    total_loyalty_redeemed = active_sales['points_redeemed'].sum() if 'points_redeemed' in active_sales.columns else 0
-    marketing_expense = total_loyalty_redeemed
+    # Marketing Expense must be 0
+    marketing_expense = 0
 
     prod_map = df_products.set_index('id')[['name', 'category', 'cost_price', 'price']].to_dict('index')
     
@@ -318,7 +318,8 @@ def calculate_profit_loss(df_sales, df_products):
                     
         except: continue
 
-    net_revenue = gross_rev - marketing_expense
+    # Net Revenue is Gross Revenue (since marketing is 0)
+    net_revenue = gross_rev 
     net_profit = net_revenue - total_cost
     
     pl_data = []
