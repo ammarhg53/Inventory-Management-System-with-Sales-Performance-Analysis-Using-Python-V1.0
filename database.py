@@ -27,7 +27,6 @@ def init_db():
                   sales_count INTEGER DEFAULT 0,
                   last_restock_date TEXT,
                   expiry_date TEXT,
-                  is_dead_stock TEXT DEFAULT 'False',
                   image_data BLOB)''')
     
     c.execute('''CREATE TABLE IF NOT EXISTS sales
@@ -66,7 +65,8 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS logs
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT, 
                   user TEXT, action TEXT, details TEXT)''')
-                  
+    
+    # Kept for compatibility, though simplified login used
     c.execute('''CREATE TABLE IF NOT EXISTS active_sessions
                  (pos_id TEXT PRIMARY KEY, username TEXT, login_time TEXT, role TEXT)''')
 
@@ -94,6 +94,13 @@ def init_db():
                   usage_limit INTEGER, 
                   used_count INTEGER DEFAULT 0,
                   bound_mobile TEXT)''')
+                  
+    c.execute('''CREATE TABLE IF NOT EXISTS lucky_draw_history
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  date TEXT,
+                  winner_name TEXT,
+                  winner_mobile TEXT,
+                  prize TEXT)''')
 
     defaults = {
         "store_name": "SmartInventory Enterprise",
@@ -208,13 +215,11 @@ def cancel_sale_transaction(sale_id, operator, role, reason, password):
     c = conn.cursor()
     
     try:
-        # 1. Password Verification
         ph = hashlib.sha256(password.encode()).hexdigest()
         c.execute("SELECT 1 FROM users WHERE username=? AND password_hash=?", (operator, ph))
         if not c.fetchone():
             return False, "Invalid Password. Identity verification failed."
 
-        # 2. Get Sale Details
         c.execute("SELECT items_json, status, operator, total_amount, timestamp FROM sales WHERE id=?", (sale_id,))
         res = c.fetchone()
         if not res:
@@ -225,21 +230,14 @@ def cancel_sale_transaction(sale_id, operator, role, reason, password):
         if status == 'Cancelled':
             return False, "Sale already cancelled"
             
-        # 3. Permission Check
-        if role == 'Operator' and sale_operator != operator:
-            return False, "Permission Denied: POS Operators can only cancel their own sales."
-
-        # 4. Restore Inventory
         items_ids = json.loads(items_json_str)
         for pid in items_ids:
             c.execute("UPDATE products SET stock = stock + 1, sales_count = sales_count - 1 WHERE id=?", (pid,))
             
-        # 5. Update Sale Record
         cancel_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         c.execute("""UPDATE sales SET status = 'Cancelled', cancellation_reason = ?, cancelled_by = ?, cancellation_timestamp = ? 
                      WHERE id=?""", (reason, operator, cancel_time, sale_id))
         
-        # 6. Audit Log
         log_msg = f"Cancelled Sale #{sale_id}. Value: {total_amount}. Reason: {reason}"
         c.execute("INSERT INTO logs (timestamp, user, action, details) VALUES (?, ?, ?, ?)",
                   (cancel_time, operator, "Undo Sale", log_msg))
@@ -372,7 +370,7 @@ def get_coupon(code, customer_mobile=None):
         if used >= limit:
             return None, "Usage Limit Reached"
         
-        if bound_mobile and bound_mobile != 'None':
+        if bound_mobile and bound_mobile != 'None' and bound_mobile != '':
              if not customer_mobile:
                  return None, "Customer identification required for this coupon"
              if bound_mobile.strip() != customer_mobile.strip():
@@ -403,16 +401,57 @@ def get_all_coupons():
     conn.close()
     return df
 
-def add_product(name, category, price, stock, cost_price, expiry_date=None, image_data=None):
+def pick_lucky_winner(lookback_days, min_spend, prize_desc):
     conn = get_connection()
     c = conn.cursor()
     
-    # Expiry ignored/simplified
-    expiry_str = "NA"
+    cutoff_date = (datetime.now() - timedelta(days=lookback_days)).strftime("%Y-%m-%d %H:%M:%S")
+    
+    # Find eligible customers based on sales in period
+    query = """
+    SELECT customer_mobile, SUM(total_amount) as spent 
+    FROM sales 
+    WHERE timestamp >= ? AND customer_mobile IS NOT NULL 
+    GROUP BY customer_mobile 
+    HAVING spent >= ?
+    """
+    c.execute(query, (cutoff_date, min_spend))
+    candidates = c.fetchall()
+    
+    if not candidates:
+        conn.close()
+        return None
+        
+    winner_mobile = random.choice(candidates)[0]
+    
+    # Get Customer Details
+    c.execute("SELECT name, mobile FROM customers WHERE mobile=?", (winner_mobile,))
+    cust_row = c.fetchone()
+    
+    if cust_row:
+        # Record Winner
+        c.execute("INSERT INTO lucky_draw_history (date, winner_name, winner_mobile, prize) VALUES (?, ?, ?, ?)",
+                  (datetime.now().strftime("%Y-%m-%d"), cust_row[0], cust_row[1], prize_desc))
+        conn.commit()
+        conn.close()
+        return {"name": cust_row[0], "mobile": cust_row[1]}
+    
+    conn.close()
+    return None
 
+def get_lucky_draw_history():
+    conn = get_connection()
+    df = pd.read_sql("SELECT * FROM lucky_draw_history ORDER BY id DESC", conn)
+    conn.close()
+    return df
+
+def add_product(name, category, price, stock, cost_price, expiry_date=None, image_data=None):
+    conn = get_connection()
+    c = conn.cursor()
+    expiry_str = "NA"
     try:
         img_blob = sqlite3.Binary(image_data) if image_data else None
-        c.execute("INSERT INTO products (name, category, price, stock, cost_price, sales_count, last_restock_date, expiry_date, is_dead_stock, image_data) VALUES (?, ?, ?, ?, ?, 0, ?, ?, 'False', ?)",
+        c.execute("INSERT INTO products (name, category, price, stock, cost_price, sales_count, last_restock_date, expiry_date, image_data) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)",
                   (name, category, price, stock, cost_price, datetime.now().strftime("%Y-%m-%d"), expiry_str, img_blob))
         conn.commit()
         return True
@@ -434,14 +473,6 @@ def delete_product(p_id):
     conn = get_connection()
     c = conn.cursor()
     c.execute("DELETE FROM products WHERE id=?", (p_id,))
-    conn.commit()
-    conn.close()
-
-def toggle_dead_stock(p_id, is_dead):
-    conn = get_connection()
-    c = conn.cursor()
-    val = 'True' if is_dead else 'False'
-    c.execute("UPDATE products SET is_dead_stock=? WHERE id=?", (val, p_id))
     conn.commit()
     conn.close()
 
@@ -506,9 +537,8 @@ def seed_advanced_demo_data():
         for cat, items in demo_products.items():
             for name, price, cost in items:
                 stock = random.randint(20, 100)
-                # No Expiry
                 expiry = "NA"
-                c.execute("INSERT INTO products (name, category, price, stock, cost_price, last_restock_date, expiry_date, is_dead_stock) VALUES (?, ?, ?, ?, ?, ?, ?, 'False')",
+                c.execute("INSERT INTO products (name, category, price, stock, cost_price, last_restock_date, expiry_date) VALUES (?, ?, ?, ?, ?, ?, ?)",
                           (name, cat, price, stock, cost, datetime.now().strftime("%Y-%m-%d"), expiry))
     
     demo_users = [
@@ -560,6 +590,14 @@ def get_transaction_history(filters=None):
 def get_full_logs():
     conn = get_connection()
     df = pd.read_sql("SELECT * FROM logs ORDER BY id DESC", conn)
+    conn.close()
+    return df
+
+def get_cancellation_audit_log():
+    conn = get_connection()
+    query = """SELECT id, timestamp, operator, cancellation_reason, cancelled_by, cancellation_timestamp 
+               FROM sales WHERE status = 'Cancelled' ORDER BY id DESC"""
+    df = pd.read_sql(query, conn)
     conn.close()
     return df
 
