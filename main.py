@@ -510,164 +510,181 @@ def inventory_manager():
         st.markdown("</div>", unsafe_allow_html=True)
 
 def analytics_dashboard():
-    st.title("📊 Admin Analytics Dashboard")
-    df_sales = db.get_sales_data()
-    
-    if 'status' in df_sales.columns:
-        active_sales = df_sales[df_sales['status'] != 'Cancelled']
-    else:
-        active_sales = df_sales
+    st.title("📊 Business Intelligence Dashboard")
+    st.markdown("---")
 
+    # Fetch Data
+    df_sales = db.get_sales_data()
     conn = db.get_connection()
-    df_prods = pd.read_sql("SELECT * FROM products", conn)
+    df_products = pd.read_sql("SELECT * FROM products", conn)
     conn.close()
-    
-    try:
-        active_sales['date'] = pd.to_datetime(active_sales['timestamp'], format='mixed', dayfirst=False, errors='coerce')
-        active_sales = active_sales.dropna(subset=['date'])
-    except:
-        st.error("Date parsing failed.")
+
+    # Data Preprocessing
+    if df_sales.empty:
+        st.warning("No sales data available to generate analytics.")
         return
 
-    # --- 1. FILTERS ---
-    with st.expander("🔽 🗓️ Time & Performance Filters", expanded=True):
-        st.write("### Select Time Period")
-        min_date = active_sales['date'].min().date() if not active_sales.empty else datetime.now().date()
-        max_date = active_sales['date'].max().date() if not active_sales.empty else datetime.now().date()
-        date_range = st.date_input("Date Range", value=(min_date, max_date), min_value=min_date, max_value=max_date)
+    # Filter Cancelled
+    if 'status' in df_sales.columns:
+        df_sales = df_sales[df_sales['status'] != 'Cancelled']
+
+    # Convert timestamps
+    df_sales['timestamp'] = pd.to_datetime(df_sales['timestamp'])
+    df_sales['date'] = df_sales['timestamp'].dt.date
+    df_sales['hour'] = df_sales['timestamp'].dt.hour
+    df_sales['day_name'] = df_sales['timestamp'].dt.day_name()
+
+    # Detailed Item Level Data
+    items_list = []
+    prod_dict = df_products.set_index('id').to_dict('index')
+
+    for _, row in df_sales.iterrows():
+        try:
+            ids = json.loads(row['items_json'])
+            for pid in ids:
+                if pid in prod_dict:
+                    p = prod_dict[pid]
+                    items_list.append({
+                        'sale_id': row['id'],
+                        'timestamp': row['timestamp'],
+                        'product_name': p['name'],
+                        'category': p['category'],
+                        'selling_price': p['price'],
+                        'cost_price': p['cost_price'],
+                        'profit': p['price'] - p['cost_price']
+                    })
+        except:
+            continue
+    
+    df_items = pd.DataFrame(items_list)
+
+    if df_items.empty:
+        st.warning("Sales data found, but unable to process item details.")
+        return
+
+    # --- 1. Total Revenue Analysis ---
+    st.subheader("1. 💰 Revenue Analysis")
+    col1, col2, col3 = st.columns(3)
+    
+    total_revenue = df_sales['total_amount'].sum()
+    revenue_today = df_sales[df_sales['date'] == datetime.now().date()]['total_amount'].sum()
+    
+    col1.metric("Total Revenue", f"{currency}{total_revenue:,.2f}")
+    col2.metric("Today's Revenue", f"{currency}{revenue_today:,.2f}")
+    
+    # Revenue Trend (Daily)
+    daily_rev = df_sales.groupby('date')['total_amount'].sum()
+    st.markdown("**Revenue Trend (Daily)**")
+    st.line_chart(daily_rev)
+
+    # --- 2. Profit Analysis ---
+    st.subheader("2. 📈 Profitability Insights")
+    # Gross Profit = Sum of (Price - Cost) for all sold items
+    gross_profit = df_items['profit'].sum()
+    margin_pct = (gross_profit / total_revenue * 100) if total_revenue > 0 else 0
+    
+    c1, c2 = st.columns(2)
+    c1.metric("Gross Profit", f"{currency}{gross_profit:,.2f}")
+    c2.metric("Net Margin", f"{margin_pct:.1f}%")
+    
+    # Most Profitable Products
+    st.markdown("**Top 5 Most Profitable Products**")
+    top_profit_products = df_items.groupby('product_name')['profit'].sum().sort_values(ascending=False).head(5)
+    st.bar_chart(top_profit_products)
+
+    # --- 3. Sales Trend Analysis ---
+    st.subheader("3. ⏰ Sales Trends")
+    c1, c2 = st.columns(2)
+    
+    with c1:
+        st.markdown("**Peak Sales Hours**")
+        hourly_sales = df_sales.groupby('hour')['total_amount'].count() # Transactions per hour
+        st.bar_chart(hourly_sales)
+        st.caption("Number of Transactions per Hour")
+
+    with c2:
+        st.markdown("**Busiest Days of Week**")
+        day_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+        daily_activity = df_sales['day_name'].value_counts().reindex(day_order)
+        st.bar_chart(daily_activity)
+
+    # --- 4. Product Performance ---
+    st.subheader("4. 🏆 Product Performance")
+    c1, c2 = st.columns(2)
+    
+    with c1:
+        st.markdown("**Top Selling Products (Qty)**")
+        top_qty = df_items['product_name'].value_counts().head(5)
+        st.table(top_qty)
         
-        filtered_sales = active_sales
-        if isinstance(date_range, tuple) and len(date_range) == 2:
-            start_d, end_d = date_range
-            mask = (active_sales['date'].dt.date >= start_d) & (active_sales['date'].dt.date <= end_d)
-            filtered_sales = active_sales.loc[mask]
+    with c2:
+        st.markdown("**Slow Moving Products**")
+        # Products in inventory but low sales in df_items
+        all_products = df_products['name'].unique()
+        sold_counts = df_items['product_name'].value_counts()
+        slow_movers = []
+        for p in all_products:
+            if p not in sold_counts:
+                slow_movers.append((p, 0))
+            else:
+                if sold_counts[p] < 5: # Threshold
+                    slow_movers.append((p, sold_counts[p]))
         
-        st.info(f"Showing data from {len(filtered_sales)} transactions")
+        df_slow = pd.DataFrame(slow_movers, columns=['Product', 'Sales Count']).sort_values('Sales Count').head(5)
+        st.table(df_slow)
 
-    # --- 2. METRICS ---
-    with st.expander("🔽 📈 Enterprise Overview Metrics"):
-        total_rev = filtered_sales['total_amount'].sum()
-        total_txns = len(filtered_sales)
-        avg_val = total_rev/total_txns if total_txns > 0 else 0
-        
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Total Revenue", f"{currency}{total_rev:,.0f}")
-        c2.metric("Active Sales", total_txns)
-        c3.metric("Avg Order Value", f"{currency}{avg_val:,.0f}")
+    # --- 5. Category Performance ---
+    st.subheader("5. 📂 Category Analytics")
+    
+    cat_perf = df_items.groupby('category').agg(
+        Revenue=('selling_price', 'sum'),
+        Profit=('profit', 'sum')
+    )
+    st.bar_chart(cat_perf)
 
-    # --- 3. P&L ---
-    with st.expander("🔽 💰 Profit & Loss Statement (Enhanced)"):
-        pl_summary, pl_df = utils.calculate_profit_loss(filtered_sales, df_prods)
-        
-        c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("Gross Revenue", f"{currency}{pl_summary['total_revenue']:,.2f}")
-        # Marketing Exp is always 0
-        c2.metric("Marketing Exp", f"{currency}{pl_summary['marketing_expense']:,.2f}")
-        c3.metric("Net Revenue", f"{currency}{pl_summary['net_revenue']:,.2f}")
-        c4.metric("Net Profit", f"{currency}{pl_summary['net_profit']:,.2f}")
-        c5.metric("Margin", f"{pl_summary['margin_percent']:.1f}%")
-        
-        st.markdown("#### Revenue Breakdown")
-        if pl_summary['total_revenue'] > 0:
-            fig, ax = plt.subplots(figsize=(8, 4))
-            ax.bar(['Gross Rev', 'Expense', 'Net Profit'], 
-                   [pl_summary['total_revenue'], pl_summary['marketing_expense'], pl_summary['net_profit']],
-                   color=['#6366f1', '#ef4444', '#10b981'])
-            st.pyplot(fig)
+    # --- 6. Quantity & Demand ---
+    st.subheader("6. 📦 Demand Analysis")
+    st.info("💡 High Demand Items are driving your revenue. Ensure they are always stocked.")
+    
+    # --- 7. Payment Mode ---
+    st.subheader("7. 💳 Payment Patterns")
+    pay_counts = df_sales['payment_mode'].value_counts()
+    
+    c1, c2 = st.columns([1, 2])
+    with c1:
+        st.write(pay_counts)
+    with c2:
+        fig, ax = plt.subplots()
+        ax.pie(pay_counts, labels=pay_counts.index, autopct='%1.1f%%', startangle=90)
+        ax.axis('equal') 
+        st.pyplot(fig)
 
-    # --- 4. CAT PROFITABILITY ---
-    with st.expander("🔽 📊 Category-wise Profitability"):
-        if not pl_df.empty:
-            c1, c2 = st.columns(2)
-            with c1:
-                st.write("**Gross Profit per Category**")
-                fig, ax = plt.subplots()
-                ax.barh(pl_df['Category'], pl_df['Profit'], color='#10b981')
-                st.pyplot(fig)
-            with c2:
-                st.write("**Category Contribution %**")
-                fig, ax = plt.subplots()
-                ax.pie(pl_df['Profit'], labels=pl_df['Category'], autopct='%1.1f%%')
-                st.pyplot(fig)
-
-    # --- 5. TRENDS ---
-    with st.expander("🔽 📅 Sales Trend Analysis"):
-        if not filtered_sales.empty:
-            c1, c2 = st.columns(2)
+    # --- 8. Inventory Insights ---
+    st.subheader("8. 📋 Inventory Recommendations")
+    
+    low_stock = df_products[df_products['stock'] < 10][['name', 'stock', 'category']]
+    excess_stock = df_products[(df_products['stock'] > 50) & (df_products['sales_count'] < 10)][['name', 'stock', 'sales_count']]
+    
+    tab1, tab2 = st.tabs(["⚠️ Restock Needed", "🛑 Excess Stock Risk"])
+    
+    with tab1:
+        if not low_stock.empty:
+            st.error(f"{len(low_stock)} items are running low.")
+            st.dataframe(low_stock, use_container_width=True)
+        else:
+            st.success("Stock levels look healthy.")
             
-            with c1:
-                st.write("**📅 Daily Sales Trend**")
-                daily = filtered_sales.groupby(filtered_sales['date'].dt.date)['total_amount'].sum().reset_index()
-                fig, ax = plt.subplots()
-                ax.plot(daily['date'], daily['total_amount'], marker='o')
-                plt.xticks(rotation=45)
-                st.pyplot(fig)
-                
-            with c2:
-                st.write("**📆 Monthly Sales Trend**")
-                filtered_sales['month'] = filtered_sales['date'].dt.to_period('M').astype(str)
-                monthly = filtered_sales.groupby('month')['total_amount'].sum()
-                fig, ax = plt.subplots()
-                monthly.plot(kind='bar', ax=ax, color='#6366f1')
-                st.pyplot(fig)
-
-    # --- 6. PAYMENT METHOD ---
-    with st.expander("🔽 💳 Payment Method Analysis"):
-        if not filtered_sales.empty:
-            # Filter for only allowed methods just in case old data exists
-            allowed_methods = ['Cash', 'UPI', 'Card']
-            mask = filtered_sales['payment_mode'].isin(allowed_methods)
-            pay_dist = filtered_sales.loc[mask, 'payment_mode'].value_counts()
+    with tab2:
+        if not excess_stock.empty:
+            st.warning(f"{len(excess_stock)} items have high stock but low sales.")
+            st.dataframe(excess_stock, use_container_width=True)
+        else:
+            st.success("No excess stock risks detected.")
             
-            fig, ax = plt.subplots(figsize=(4,4))
-            ax.pie(pay_dist, labels=pay_dist.index, autopct='%1.1f%%')
-            st.pyplot(fig)
-            st.info("Market Trend (Algo #32): ↗️ Increasing")
-
-    # --- 7. FORECASTING ---
-    with st.expander("🔽 🔮 Demand Forecasting"):
-        if not filtered_sales.empty:
-            daily_vals = filtered_sales.groupby(filtered_sales['date'].dt.date)['total_amount'].sum().values
-            prediction = utils.forecast_next_period(daily_vals)
-            
-            st.metric("Predicted Next Day Sales", f"{currency}{prediction:,.2f}")
-            st.caption("Algorithm: Weighted Moving Average (Window = 5)")
-            
-            # Line Graph of history
-            daily_series = filtered_sales.groupby(filtered_sales['date'].dt.date)['total_amount'].sum()
-            dates = [str(d) for d in daily_series.index]
-            values = list(daily_series.values)
-            
-            # Append Forecast
-            dates.append("FORECAST")
-            values.append(prediction)
-            
-            fig, ax = plt.subplots()
-            ax.plot(dates[:-1], values[:-1], label='Historical', marker='o')
-            ax.plot(dates[-2:], values[-2:], label='Forecast', linestyle='--', color='orange', marker='x')
-            plt.xticks(rotation=45)
-            plt.legend()
-            st.pyplot(fig)
-
-    # --- 8. REMOVED (Rankings/Product Performance) ---
-
-    # --- 9. CATEGORY PERF ANALYSIS ---
-    with st.expander("🔽 📊 Category Performance Analysis"):
-        if not pl_df.empty:
-            st.write("**Total Revenue Comparison**")
-            fig, ax = plt.subplots()
-            ax.bar(pl_df['Category'], pl_df['Revenue'], color='#8b5cf6')
-            plt.xticks(rotation=45)
-            st.pyplot(fig)
-
-    # --- 10. ALGO SHOWCASE ---
-    with st.expander("🔽 🧠 Algorithm Showcase (Academic)"):
-        algo_data = pd.DataFrame({
-            "Algorithm": ["Linear Search O(n)", "Binary Search O(log n)"],
-            "Time (ms)": ["0.0240", "0.0120"],
-            "Data Size": [70, 70]
-        })
-        st.table(algo_data)
+    # Optional Advanced: AOV
+    st.markdown("---")
+    avg_order_value = total_revenue / len(df_sales)
+    st.metric("🛒 Average Order Value (AOV)", f"{currency}{avg_order_value:,.2f}")
 
 def marketing_hub():
     st.title("🚀 Retail Marketing Hub")
