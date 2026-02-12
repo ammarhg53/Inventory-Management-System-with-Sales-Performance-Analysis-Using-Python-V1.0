@@ -184,18 +184,21 @@ def pos_interface():
                             st.warning(f"New Customer: {normalized_phone}")
             
             if st.session_state.get('temp_new_customer') and not st.session_state.get('current_customer'):
+                st.markdown("##### 📝 New Customer Details")
                 with st.form("new_cust_form"):
                     new_name = st.text_input("Full Name")
-                    new_email = st.text_input("Email (Optional)")
+                    new_email = st.text_input("Email (Mandatory)")
                     if st.form_submit_button("Save Customer"):
-                        if new_name:
+                        if not new_name:
+                            st.error("Name is required.")
+                        elif not new_email or not utils.validate_email(new_email):
+                            st.error("Please enter a valid email address.")
+                        else:
                             db.upsert_customer(st.session_state['temp_new_customer'], new_name, new_email)
                             st.session_state['current_customer'] = db.get_customer(st.session_state['temp_new_customer'])
                             st.session_state.pop('temp_new_customer', None)
                             st.success("Customer Added!")
                             st.rerun()
-                        else:
-                            st.error("Name is required.")
             
             if st.session_state.get('current_customer'):
                 st.info(f"Selected: {st.session_state['current_customer']['name']} ({st.session_state['current_customer']['mobile']})")
@@ -265,11 +268,11 @@ def pos_interface():
                 
                 raw_total = summary['Total'].sum()
                 
+                # Discounts/Coupons Removed
                 discount = 0
-                loss_discount = 0 # Feature disabled, kept variable 0
-                fest_disc = 0 # Feature disabled, kept 0
+                fest_disc = 0 
 
-                total_after_disc = max(0, raw_total - discount - fest_disc - st.session_state['points_to_redeem'] - loss_discount)
+                total_after_disc = max(0, raw_total - discount - fest_disc - st.session_state['points_to_redeem'])
                 
                 gst_enabled = db.get_setting("gst_enabled") == 'True'
                 tax_amount = 0.0
@@ -305,7 +308,7 @@ def pos_interface():
                             st.session_state['final_calc'] = {
                                 "total": final_total, 
                                 "tax": tax_amount, 
-                                "discount": discount + fest_disc + loss_discount,
+                                "discount": discount + fest_disc,
                                 "points": st.session_state['points_to_redeem']
                             }
                             st.session_state['checkout_stage'] = 'payment_method'
@@ -419,6 +422,7 @@ def finalize_sale(total, mode):
     integrity_hash = utils.generate_integrity_hash((txn_time, total, items_json, operator))
     
     try:
+        # Calls db.process_sale_transaction without coupon args
         sale_id = db.process_sale_transaction(
             st.session_state['cart'],
             total,
@@ -427,8 +431,6 @@ def finalize_sale(total, mode):
             st.session_state['pos_id'],
             customer_mobile,
             calc['tax'],
-            calc['discount'],
-            None, # Coupon Code
             calc['points'],
             points_earned,
             integrity_hash,
@@ -521,180 +523,177 @@ def analytics_dashboard():
     except:
         st.error("Date parsing failed.")
         return
-    
-    # 1. Time Filters
-    st.markdown("<div class='card-container'>", unsafe_allow_html=True)
-    st.markdown("### 🗓️ Time & Performance Filters")
-    
-    min_date = active_sales['date'].min().date() if not active_sales.empty else datetime.now().date()
-    max_date = active_sales['date'].max().date() if not active_sales.empty else datetime.now().date()
-    
-    date_range = st.date_input("Select Date Range", value=(min_date, max_date), min_value=min_date, max_value=max_date)
-    
-    filtered_sales = active_sales
-    if isinstance(date_range, tuple) and len(date_range) == 2:
-        start_d, end_d = date_range
-        mask = (active_sales['date'].dt.date >= start_d) & (active_sales['date'].dt.date <= end_d)
-        filtered_sales = active_sales.loc[mask]
 
-    st.caption(f"Showing data from {len(filtered_sales)} transactions")
-    st.markdown("</div>", unsafe_allow_html=True)
-    
-    # 2. Enterprise Analytics Metrics
-    st.subheader("📈 Enterprise Analytics")
-    total_rev = filtered_sales['total_amount'].sum()
-    total_txns = len(filtered_sales)
-    avg_val = total_rev/total_txns if total_txns > 0 else 0
-    
-    m1, m2, m3 = st.columns(3)
-    with m1: st.metric("Total Revenue", f"{currency}{total_rev:,.0f}")
-    with m2: st.metric("Active Sales", total_txns)
-    with m3: st.metric("Avg Order Value", f"{currency}{avg_val:,.0f}")
+    # --- 1. FILTERS ---
+    with st.expander("🔽 🗓️ Time & Performance Filters", expanded=True):
+        st.write("### Select Time Period")
+        min_date = active_sales['date'].min().date() if not active_sales.empty else datetime.now().date()
+        max_date = active_sales['date'].max().date() if not active_sales.empty else datetime.now().date()
+        date_range = st.date_input("Date Range", value=(min_date, max_date), min_value=min_date, max_value=max_date)
+        
+        filtered_sales = active_sales
+        if isinstance(date_range, tuple) and len(date_range) == 2:
+            start_d, end_d = date_range
+            mask = (active_sales['date'].dt.date >= start_d) & (active_sales['date'].dt.date <= end_d)
+            filtered_sales = active_sales.loc[mask]
+        
+        st.info(f"Showing data from {len(filtered_sales)} transactions")
 
-    # 3. P&L Statement (Enhanced)
-    st.markdown("---")
-    st.subheader("💰 Profit & Loss Statement (Enhanced)")
-    pl_summary, pl_df = utils.calculate_profit_loss(filtered_sales, df_prods) 
-    
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Gross Revenue", f"{currency}{pl_summary['total_revenue']:,.2f}")
-    c2.metric("Marketing Expense", f"{currency}{pl_summary['marketing_expense']:,.2f}")
-    c3.metric("Net Revenue", f"{currency}{pl_summary['net_revenue']:,.2f}")
-    c4.metric("Net Profit", f"{currency}{pl_summary['net_profit']:,.2f}")
-    c5.metric("Margin", f"{pl_summary['margin_percent']:.1f}%")
+    # --- 2. METRICS ---
+    with st.expander("🔽 📈 Enterprise Overview Metrics"):
+        total_rev = filtered_sales['total_amount'].sum()
+        total_txns = len(filtered_sales)
+        avg_val = total_rev/total_txns if total_txns > 0 else 0
+        
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Total Revenue", f"{currency}{total_rev:,.0f}")
+        c2.metric("Active Sales", total_txns)
+        c3.metric("Avg Order Value", f"{currency}{avg_val:,.0f}")
 
-    # 4. Graphs & Visuals
-    st.markdown("---")
-    c_graph1, c_graph2 = st.columns(2)
-    
-    with c_graph1:
-        st.markdown("##### 📊 Category-wise Gross Profitability")
+    # --- 3. P&L ---
+    with st.expander("🔽 💰 Profit & Loss Statement (Enhanced)"):
+        pl_summary, pl_df = utils.calculate_profit_loss(filtered_sales, df_prods)
+        
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("Gross Revenue", f"{currency}{pl_summary['total_revenue']:,.2f}")
+        c2.metric("Marketing Exp", f"{currency}{pl_summary['marketing_expense']:,.2f}")
+        c3.metric("Net Revenue", f"{currency}{pl_summary['net_revenue']:,.2f}")
+        c4.metric("Net Profit", f"{currency}{pl_summary['net_profit']:,.2f}")
+        c5.metric("Margin", f"{pl_summary['margin_percent']:.1f}%")
+        
+        st.markdown("#### Revenue Breakdown")
+        if pl_summary['total_revenue'] > 0:
+            fig, ax = plt.subplots(figsize=(8, 4))
+            ax.bar(['Gross Rev', 'Expense', 'Net Profit'], 
+                   [pl_summary['total_revenue'], pl_summary['marketing_expense'], pl_summary['net_profit']],
+                   color=['#6366f1', '#ef4444', '#10b981'])
+            st.pyplot(fig)
+
+    # --- 4. CAT PROFITABILITY ---
+    with st.expander("🔽 📊 Category-wise Profitability"):
         if not pl_df.empty:
-            # Bar Graph
-            st.bar_chart(pl_df.set_index('Category')['Profit'])
-            # Pie Chart
-            fig, ax = plt.subplots()
-            ax.pie(pl_df['Profit'], labels=pl_df['Category'], autopct='%1.1f%%', startangle=90)
-            ax.axis('equal')
-            st.pyplot(fig)
-    
-    with c_graph2:
-        st.markdown("##### 📅 Daily Sales Trend")
+            c1, c2 = st.columns(2)
+            with c1:
+                st.write("**Gross Profit per Category**")
+                fig, ax = plt.subplots()
+                ax.barh(pl_df['Category'], pl_df['Profit'], color='#10b981')
+                st.pyplot(fig)
+            with c2:
+                st.write("**Category Contribution %**")
+                fig, ax = plt.subplots()
+                ax.pie(pl_df['Profit'], labels=pl_df['Category'], autopct='%1.1f%%')
+                st.pyplot(fig)
+
+    # --- 5. TRENDS ---
+    with st.expander("🔽 📅 Sales Trend Analysis"):
         if not filtered_sales.empty:
-            daily = filtered_sales.groupby(filtered_sales['date'].dt.date)['total_amount'].sum().reset_index()
-            # Matplotlib line graph
-            fig, ax = plt.subplots()
-            ax.plot(daily['date'], daily['total_amount'], marker='o', linestyle='-')
-            plt.xticks(rotation=45)
-            st.pyplot(fig)
+            c1, c2 = st.columns(2)
             
-        st.markdown("##### 💳 Payment Method Usage")
+            with c1:
+                st.write("**📅 Daily Sales Trend**")
+                daily = filtered_sales.groupby(filtered_sales['date'].dt.date)['total_amount'].sum().reset_index()
+                fig, ax = plt.subplots()
+                ax.plot(daily['date'], daily['total_amount'], marker='o')
+                plt.xticks(rotation=45)
+                st.pyplot(fig)
+                
+            with c2:
+                st.write("**📆 Monthly Sales Trend**")
+                filtered_sales['month'] = filtered_sales['date'].dt.to_period('M').astype(str)
+                monthly = filtered_sales.groupby('month')['total_amount'].sum()
+                fig, ax = plt.subplots()
+                monthly.plot(kind='bar', ax=ax, color='#6366f1')
+                st.pyplot(fig)
+
+    # --- 6. PAYMENT METHOD ---
+    with st.expander("🔽 💳 Payment Method Analysis"):
         if not filtered_sales.empty:
             pay_dist = filtered_sales['payment_mode'].value_counts()
-            fig, ax = plt.subplots()
-            ax.pie(pay_dist, labels=pay_dist.index, autopct='%1.1f%%', startangle=90)
-            ax.axis('equal')
+            fig, ax = plt.subplots(figsize=(4,4))
+            ax.pie(pay_dist, labels=pay_dist.index, autopct='%1.1f%%')
             st.pyplot(fig)
             st.info("Market Trend (Algo #32): ↗️ Increasing")
 
-    # 5. Monthly Trend & Prediction
-    st.markdown("---")
-    c_pred1, c_pred2 = st.columns(2)
-    
-    with c_pred1:
-        st.markdown("##### 📆 Monthly Sales Trend")
-        if not filtered_sales.empty:
-            filtered_sales['month'] = filtered_sales['date'].dt.to_period('M').astype(str)
-            monthly = filtered_sales.groupby('month')['total_amount'].sum()
-            st.bar_chart(monthly)
-            
-    with c_pred2:
-        st.markdown("##### 🔮 Predicted Next Day Sales")
+    # --- 7. FORECASTING ---
+    with st.expander("🔽 🔮 Demand Forecasting"):
         if not filtered_sales.empty:
             daily_vals = filtered_sales.groupby(filtered_sales['date'].dt.date)['total_amount'].sum().values
             prediction = utils.forecast_next_period(daily_vals)
-            st.metric("Value", f"{currency}{prediction:,.2f}")
+            
+            st.metric("Predicted Next Day Sales", f"{currency}{prediction:,.2f}")
             st.caption("Algorithm: Weighted Moving Average (Window = 5)")
+            
+            # Line Graph of history
+            daily_series = filtered_sales.groupby(filtered_sales['date'].dt.date)['total_amount'].sum()
+            dates = [str(d) for d in daily_series.index]
+            values = list(daily_series.values)
+            
+            # Append Forecast
+            dates.append("FORECAST")
+            values.append(prediction)
+            
+            fig, ax = plt.subplots()
+            ax.plot(dates[:-1], values[:-1], label='Historical', marker='o')
+            ax.plot(dates[-2:], values[-2:], label='Forecast', linestyle='--', color='orange', marker='x')
+            plt.xticks(rotation=45)
+            plt.legend()
+            st.pyplot(fig)
 
-    # 6. Algorithm Showcase
-    st.markdown("---")
-    st.subheader("🧠 Algorithm Showcase")
-    algo_data = pd.DataFrame({
-        "Algorithm": ["Linear Search O(n)", "Binary Search O(log n)"],
-        "Time (ms)": ["0.0240", "0.0120"],
-        "Data Size": [70, 70]
-    })
-    st.table(algo_data)
+    # --- 8. PRODUCT PERF ---
+    with st.expander("🔽 ⭐ Product Performance"):
+        high, low, star = utils.get_product_performance_lists(filtered_sales, df_prods)
+        c1, c2, c3 = st.columns(3)
+        with c1: 
+            st.success("⭐ High Performers")
+            for p in high: st.write(f"• {p}")
+        with c2:
+            st.error("⚠️ Low Performers")
+            for p in low: st.write(f"• {p}")
+        with c3:
+            st.warning("🌟 Star Performers")
+            for p in star: st.write(f"• {p}")
 
-    # 7. Product Performance
-    st.markdown("---")
-    st.subheader("⭐ Product Performance")
-    high, low, star = utils.get_product_performance_lists(filtered_sales, df_prods)
-    
-    c_perf1, c_perf2, c_perf3 = st.columns(3)
-    with c_perf1:
-        st.markdown("**High Performers**")
-        for p in high: st.write(f"- {p}")
-    with c_perf2:
-        st.markdown("**Low Performers**")
-        for p in low: st.write(f"- {p}")
-    with c_perf3:
-        st.markdown("**Star Performers**")
-        for p in star: st.write(f"- {p}")
+    # --- 9. CATEGORY PERF ANALYSIS ---
+    with st.expander("🔽 📊 Category Performance Analysis"):
+        if not pl_df.empty:
+            st.write("**Total Revenue Comparison**")
+            fig, ax = plt.subplots()
+            ax.bar(pl_df['Category'], pl_df['Revenue'], color='#8b5cf6')
+            plt.xticks(rotation=45)
+            st.pyplot(fig)
 
-    # 8. Category Performance Analysis
-    st.markdown("---")
-    st.subheader("📊 Category Performance Analysis")
-    if not pl_df.empty:
-        st.bar_chart(pl_df.set_index('Category')['Revenue'])
+    # --- 10. ALGO SHOWCASE ---
+    with st.expander("🔽 🧠 Algorithm Showcase (Academic)"):
+        algo_data = pd.DataFrame({
+            "Algorithm": ["Linear Search O(n)", "Binary Search O(log n)"],
+            "Time (ms)": ["0.0240", "0.0120"],
+            "Data Size": [70, 70]
+        })
+        st.table(algo_data)
 
 def marketing_hub():
     st.title("🚀 Retail Marketing Hub")
     
-    t1, t2 = st.tabs(["🎟️ Coupons", "🎲 Lucky Draw"])
+    st.markdown("<div class='card-container'>", unsafe_allow_html=True)
+    st.subheader("🎲 Lucky Draw System")
+    st.caption("Select winner from eligible customers based on sales history.")
     
-    with t1:
-        st.markdown("<div class='card-container'>", unsafe_allow_html=True)
-        st.subheader("Create Discount Coupon")
-        with st.form("new_coupon"):
-            cc_code = st.text_input("Coupon Code (e.g., SUMMER10)")
-            cc_type = st.selectbox("Type", ["Flat", "Percentage"])
-            cc_val = st.number_input("Value", min_value=0.0, value=1.0)
-            cc_min = st.number_input("Minimum Bill Amount", min_value=0.0, value=0.0)
-            cc_days = st.number_input("Validity (Days)", min_value=1, value=30)
-            cc_lim = st.number_input("Total Usage Limit", min_value=1, value=100)
-            cc_mob = st.text_input("Bound to Mobile (optional)")
+    c1, c2, c3 = st.columns(3)
+    ld_days = c1.number_input("Sales Lookback (Days)", value=7)
+    ld_min = c2.number_input("Minimum Spend", value=1000)
+    ld_prize = c3.text_input("Prize", value="Mystery Gift Box")
+    
+    if st.button("🎰 Pick Winner"):
+        winner = db.pick_lucky_winner(ld_days, ld_min, ld_prize)
+        if winner:
+            st.balloons()
+            st.success(f"🎉 Winner: {winner['name']} ({winner['mobile']})")
+        else:
+            st.warning("No eligible customers found.")
             
-            if st.form_submit_button("Create Coupon"):
-                ctype = "%" if cc_type == "Percentage" else "Flat"
-                bound = cc_mob if cc_mob else None
-                if db.create_coupon(cc_code, ctype, cc_val, cc_min, cc_days, cc_lim, bound):
-                    st.success("Coupon Created!")
-                else:
-                    st.error("Error creating coupon.")
-        
-        st.markdown("#### Active Coupons")
-        st.dataframe(db.get_all_coupons(), use_container_width=True)
-        st.markdown("</div>", unsafe_allow_html=True)
-        
-    with t2:
-        st.markdown("<div class='card-container'>", unsafe_allow_html=True)
-        st.subheader("Lucky Draw System")
-        c1, c2, c3 = st.columns(3)
-        ld_days = c1.number_input("Sales Lookback (Days)", value=7)
-        ld_min = c2.number_input("Minimum Spend", value=1000)
-        ld_prize = c3.text_input("Prize", value="Mystery Gift Box")
-        
-        if st.button("🎰 Pick Winner"):
-            winner = db.pick_lucky_winner(ld_days, ld_min, ld_prize)
-            if winner:
-                st.balloons()
-                st.success(f"🎉 Winner: {winner['name']} ({winner['mobile']})")
-            else:
-                st.warning("No eligible customers found.")
-                
-        st.dataframe(db.get_lucky_draw_history(), use_container_width=True)
-        st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown("#### Past Winners")
+    st.dataframe(db.get_lucky_draw_history(), use_container_width=True)
+    st.markdown("</div>", unsafe_allow_html=True)
 
 def orders_page():
     st.title("📜 Order & Payment Details")
@@ -715,6 +714,26 @@ def orders_page():
         
     st.dataframe(txns, use_container_width=True)
     
+    st.markdown("---")
+    st.subheader("❌ Cancel Order (Admin Only)")
+    with st.form("cancel_order_form"):
+        c_oid = st.number_input("Order ID to Cancel", min_value=1, step=1)
+        c_reason = st.text_input("Cancellation Reason (Mandatory)")
+        c_pass = st.text_input("Admin Password to Confirm", type="password")
+        
+        if st.form_submit_button("🚨 Cancel Order"):
+            if not c_reason:
+                st.error("Reason is mandatory.")
+            else:
+                success, msg = db.cancel_sale_transaction(c_oid, st.session_state['user'], st.session_state['role'], c_reason, c_pass)
+                if success:
+                    st.success(msg)
+                    time.sleep(1)
+                    st.rerun()
+                else:
+                    st.error(msg)
+    
+    st.markdown("---")
     st.subheader("🚫 Cancelled Orders Audit")
     cancels = db.get_cancellation_audit_log()
     st.dataframe(cancels, use_container_width=True)
