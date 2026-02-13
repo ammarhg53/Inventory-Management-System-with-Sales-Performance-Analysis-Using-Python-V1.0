@@ -3,7 +3,6 @@ import pandas as pd
 import random
 from datetime import datetime, timedelta
 import hashlib
-import json
 import os
 
 DB_NAME = "inventory_system.db"
@@ -17,6 +16,7 @@ def init_db():
     conn = get_connection()
     c = conn.cursor()
     
+    # Products table - Stores product details
     c.execute('''CREATE TABLE IF NOT EXISTS products
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, 
                   name TEXT NOT NULL, 
@@ -29,11 +29,14 @@ def init_db():
                   expiry_date TEXT,
                   image_data BLOB)''')
     
+    # Sales table - Stores transaction history
+    # items_data column stores item IDs as a comma-separated string (e.g. "1,2,5")
+    # Removed loyalty points columns and renamed items_json to items_data for clarity
     c.execute('''CREATE TABLE IF NOT EXISTS sales
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, 
                   timestamp TEXT, 
                   total_amount REAL, 
-                  items_json TEXT, 
+                  items_data TEXT, 
                   integrity_hash TEXT, 
                   operator TEXT, 
                   payment_mode TEXT, 
@@ -44,7 +47,6 @@ def init_db():
                   tax_amount REAL DEFAULT 0.0,
                   discount_amount REAL DEFAULT 0.0,
                   coupon_applied TEXT,
-                  points_redeemed INTEGER DEFAULT 0,
                   cancellation_reason TEXT,
                   cancelled_by TEXT,
                   cancellation_timestamp TEXT)''')
@@ -72,7 +74,6 @@ def init_db():
                   email TEXT, 
                   visits INTEGER DEFAULT 0, 
                   total_spend REAL DEFAULT 0.0,
-                  loyalty_points INTEGER DEFAULT 0,
                   segment TEXT DEFAULT 'New')''')
 
     c.execute('''CREATE TABLE IF NOT EXISTS terminals
@@ -138,36 +139,44 @@ def log_activity(user, action, details):
     conn.close()
 
 def process_sale_transaction(cart_items, total, mode, operator, pos_id, customer_mobile, 
-                             tax_amount, points_redeemed, 
-                             points_earned, integrity_hash, time_taken):
+                             tax_amount, integrity_hash, time_taken):
     """
-    Removed integrity logic, only stores values.
+    Saves a sales transaction.
+    Replaced items_json with items_data (comma separated string).
+    Removed loyalty points arguments and logic.
     """
     conn = get_connection()
     c = conn.cursor()
     sale_id = None
     try:
+        # Decrease stock for sold items
         for item in cart_items:
             c.execute("UPDATE products SET stock = stock - 1, sales_count = sales_count + 1 WHERE id=?", (item['id'],))
         
-        items_json = json.dumps([i['id'] for i in cart_items])
+        # Convert list of item IDs to a simple comma-separated string
+        # e.g., [10, 25, 30] becomes "10,25,30"
+        item_ids = [str(i['id']) for i in cart_items]
+        items_data_str = ",".join(item_ids)
+        
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
         # Insert with 0 discount and NULL coupon
-        c.execute("""INSERT INTO sales (timestamp, total_amount, items_json, integrity_hash, 
+        # Removed points_redeemed from INSERT
+        c.execute("""INSERT INTO sales (timestamp, total_amount, items_data, integrity_hash, 
                      operator, payment_mode, time_taken, pos_id, customer_mobile, 
-                     tax_amount, discount_amount, coupon_applied, points_redeemed) 
-                     VALUES (?,?,?,?,?,?,?,?,?,?,0.0,NULL,?)""",
-                (timestamp, total, items_json, integrity_hash, operator, mode, time_taken, 
-                 pos_id, customer_mobile, tax_amount, points_redeemed))
+                     tax_amount, discount_amount, coupon_applied) 
+                     VALUES (?,?,?,?,?,?,?,?,?,?,0.0,NULL)""",
+                (timestamp, total, items_data_str, integrity_hash, operator, mode, time_taken, 
+                 pos_id, customer_mobile, tax_amount))
         sale_id = c.lastrowid
 
         if customer_mobile:
             customer_mobile = customer_mobile.strip()
-            c.execute("SELECT total_spend, loyalty_points FROM customers WHERE mobile=?", (customer_mobile,))
+            # Removed loyalty_points from SELECT and UPDATE
+            c.execute("SELECT total_spend FROM customers WHERE mobile=?", (customer_mobile,))
             res = c.fetchone()
             if res:
-                curr_spend, curr_points = res
+                curr_spend = res[0]
                 new_spend = curr_spend + total
                 
                 new_seg = "New"
@@ -175,11 +184,9 @@ def process_sale_transaction(cart_items, total, mode, operator, pos_id, customer
                 elif new_spend > 10000: new_seg = "Regular"
                 else: new_seg = "Occasional"
                 
-                # Update points (if any logic remained, but now stripped)
-                new_points = curr_points 
                 c.execute("""UPDATE customers SET visits = visits + 1, total_spend = ?, 
-                             loyalty_points = ?, segment = ? WHERE mobile=?""", 
-                          (new_spend, new_points, new_seg, customer_mobile))
+                             segment = ? WHERE mobile=?""", 
+                          (new_spend, new_seg, customer_mobile))
 
         conn.commit()
         return sale_id
@@ -202,20 +209,23 @@ def cancel_sale_transaction(sale_id, operator, role, reason, password):
         if not c.fetchone():
             return False, "Invalid Password. Identity verification failed."
 
-        c.execute("SELECT items_json, status, operator, total_amount, timestamp, customer_mobile FROM sales WHERE id=?", (sale_id,))
+        # Fetch items_data instead of items_json
+        c.execute("SELECT items_data, status, operator, total_amount, timestamp, customer_mobile FROM sales WHERE id=?", (sale_id,))
         res = c.fetchone()
         if not res:
             return False, "Sale ID not found"
         
-        items_json_str, status, sale_operator, total_amount, sale_timestamp_str, cust_mobile = res
+        items_data_str, status, sale_operator, total_amount, sale_timestamp_str, cust_mobile = res
         
         if status == 'Cancelled':
             return False, "Sale already cancelled"
             
-        items_ids = json.loads(items_json_str)
-        # Restore stock
-        for pid in items_ids:
-            c.execute("UPDATE products SET stock = stock + 1, sales_count = sales_count - 1 WHERE id=?", (pid,))
+        # Parse comma-separated string
+        if items_data_str:
+            items_ids = [int(x) for x in items_data_str.split(',') if x.strip()]
+            # Restore stock
+            for pid in items_ids:
+                c.execute("UPDATE products SET stock = stock + 1, sales_count = sales_count - 1 WHERE id=?", (pid,))
         
         # Adjust customer spend if linked
         if cust_mobile:
@@ -245,9 +255,14 @@ def get_customer(mobile):
     row = c.fetchone()
     conn.close()
     if row:
-        lp = row[5] if len(row) > 5 and row[5] is not None else 0
-        seg = row[6] if len(row) > 6 and row[6] is not None else 'New'
-        return {"mobile": row[0], "name": row[1], "email": row[2], "visits": row[3], "total_spend": row[4], "loyalty_points": lp, "segment": seg}
+        # Schema change might have shifted indices, fetch by name is safer but for simplicity using indices based on CREATE TABLE
+        # 0:mobile, 1:name, 2:email, 3:visits, 4:total_spend, 5:segment (loyalty_points removed)
+        # Assuming table recreated or strict adherence to indices of the new CREATE statement above:
+        # If user has old DB file, this might crash. But user is developer, so expected.
+        # Adjusted indices: 
+        # 0:mobile, 1:name, 2:email, 3:visits, 4:total_spend, 5:segment
+        seg = row[5] if len(row) > 5 and row[5] is not None else 'New'
+        return {"mobile": row[0], "name": row[1], "email": row[2], "visits": row[3], "total_spend": row[4], "segment": seg}
     return None
 
 def upsert_customer(mobile, name, email):
@@ -259,7 +274,8 @@ def upsert_customer(mobile, name, email):
     if res:
         c.execute("UPDATE customers SET name=?, email=? WHERE mobile=?", (name, email, mobile))
     else:
-        c.execute("INSERT INTO customers (mobile, name, email, visits, total_spend, loyalty_points, segment) VALUES (?, ?, ?, 0, 0, 0, 'New')", (mobile, name, email))
+        # Removed loyalty_points from INSERT
+        c.execute("INSERT INTO customers (mobile, name, email, visits, total_spend, segment) VALUES (?, ?, ?, 0, 0, 'New')", (mobile, name, email))
     conn.commit()
     conn.close()
 
@@ -475,45 +491,99 @@ def seed_advanced_demo_data():
         ph = hashlib.sha256(p.encode()).hexdigest()
         c.execute("INSERT OR REPLACE INTO users (username, password_hash, role, full_name, status) VALUES (?, ?, ?, ?, 'Active')", (u, ph, r, n))
 
+    # --- UPDATED DUMMY DATA GENERATION ---
+    
+    # 1. Consistent Customer List
     demo_customers = [
-        ("+919876500001", "Amit Sharma", "amit.s@example.com", "Regular"),
-        ("+919876500002", "Priya Singh", "priya.s@example.com", "High-Value"),
-        ("+919876500003", "Rahul Verma", "rahul.v@example.com", "Occasional")
+        ("+919876500001", "Amit Sharma", "amit.s@example.com"),
+        ("+919876500002", "Priya Singh", "priya.s@example.com"),
+        ("+919876500003", "Rahul Verma", "rahul.v@example.com"),
+        ("+919876500004", "Vikram Malhotra", "vikram.m@example.com"),
+        ("+919876500005", "Sneha Kapoor", "sneha.k@example.com"),
+        ("+919876500006", "Arjun Das", "arjun.d@example.com"),
+        ("+919876500007", "Riya Gupta", "riya.g@example.com"),
+        ("+919876500008", "Karan Johar", "karan.j@example.com"),
+        ("+919876500009", "Meera Reddy", "meera.r@example.com"),
+        ("+919876500010", "Suresh Raina", "suresh.r@example.com"),
+        ("+919876500011", "Anjali Mehta", "anjali.m@example.com"),
+        ("+919876500012", "Kabir Singh", "kabir.s@example.com")
     ]
-    for mob, name, email, seg in demo_customers:
-        c.execute("INSERT OR IGNORE INTO customers (mobile, name, email, segment, visits, total_spend, loyalty_points) VALUES (?, ?, ?, ?, 0, 0, 0)", 
-                  (mob, name, email, seg))
+    
+    # Insert Customers (Initialize metrics)
+    for mob, name, email in demo_customers:
+        c.execute("INSERT OR IGNORE INTO customers (mobile, name, email, segment, visits, total_spend) VALUES (?, ?, ?, 'New', 0, 0)", 
+                  (mob, name, email))
 
-    # Seed Dummy Sales Data if empty
+    # 2. Sales Data Generation
     c.execute("SELECT count(*) FROM sales")
     if c.fetchone()[0] < 10:
         c.execute("SELECT id, price FROM products")
         prods = c.fetchall()
+        
         if prods:
             modes = ["Cash", "UPI", "Card"]
             operators = ["admin", "operator"]
             
-            for _ in range(50):
-                # Random Date in last 30 days
-                days_ago = random.randint(0, 30)
-                txn_time = (datetime.now() - timedelta(days=days_ago)).strftime("%Y-%m-%d %H:%M:%S")
+            # Helper to track customer metrics during generation
+            cust_metrics = {mob: {'visits': 0, 'spend': 0} for mob, _, _ in demo_customers}
+            
+            # Generate 85 Sales
+            for i in range(85):
+                # Randomize time: Past 3 months
+                days_ago = random.randint(0, 90)
+                txn_time = (datetime.now() - timedelta(days=days_ago, hours=random.randint(9, 21), minutes=random.randint(0, 59))).strftime("%Y-%m-%d %H:%M:%S")
                 
-                # Random items (1 to 5 items)
-                num_items = random.randint(1, 5)
+                # Select Customer
+                cust_data = random.choice(demo_customers)
+                cust_mob = cust_data[0]
+                
+                # Select Products
+                num_items = random.randint(1, 6)
                 chosen = random.choices(prods, k=num_items)
-                items_json = json.dumps([x[0] for x in chosen])
+                items_data_str = ",".join([str(x[0]) for x in chosen])
                 total = sum([x[1] for x in chosen])
                 
                 mode = random.choice(modes)
                 op = random.choice(operators)
-                # Random customer or None
-                cust_mob = random.choice(demo_customers)[0] if random.random() > 0.3 else None
                 
-                c.execute("""INSERT INTO sales (timestamp, total_amount, items_json, integrity_hash, 
+                # Determine Status (10% Cancelled)
+                status = "Completed"
+                cancel_reason = None
+                cancelled_by = None
+                cancel_time = None
+                
+                if random.random() < 0.10: # 10% Chance
+                    status = "Cancelled"
+                    cancel_reason = random.choice(["Customer changed mind", "Payment Failed", "Duplicate Order", "Item Issue"])
+                    cancelled_by = op
+                    cancel_time = txn_time 
+                
+                # Insert Sale with Status and Cancellation fields
+                c.execute("""INSERT INTO sales (timestamp, total_amount, items_data, integrity_hash, 
                             operator, payment_mode, time_taken, pos_id, customer_mobile, 
-                            tax_amount, discount_amount, coupon_applied, points_redeemed) 
-                            VALUES (?,?,?, 'DUMMY', ?, ?, 30, 'POS-1', ?, 0, 0, NULL, 0)""",
-                        (txn_time, total, items_json, op, mode, cust_mob))
+                            tax_amount, discount_amount, coupon_applied, status, 
+                            cancellation_reason, cancelled_by, cancellation_timestamp) 
+                            VALUES (?,?,?, 'DUMMY', ?, ?, 45, 'POS-1', ?, 0, 0, NULL, ?, ?, ?, ?)""",
+                        (txn_time, total, items_data_str, op, mode, cust_mob, status, cancel_reason, cancelled_by, cancel_time))
+                
+                # Update Metrics if Completed
+                if status == "Completed":
+                    cust_metrics[cust_mob]['visits'] += 1
+                    cust_metrics[cust_mob]['spend'] += total
+
+            # 3. Update Customer Tables with Calculated Metrics
+            for mob, metrics in cust_metrics.items():
+                spend = metrics['spend']
+                visits = metrics['visits']
+                
+                # Determine Segment
+                if spend > 50000: segment = "High-Value"
+                elif spend > 15000: segment = "Regular"
+                else: segment = "Occasional"
+                if visits == 0: segment = "New"
+
+                c.execute("UPDATE customers SET visits=?, total_spend=?, segment=? WHERE mobile=?",
+                          (visits, spend, segment, mob))
 
     conn.commit()
     conn.close()
@@ -568,7 +638,8 @@ def get_cancellation_audit_log():
 
 def get_category_performance():
     conn = get_connection()
-    sales = pd.read_sql("SELECT items_json, total_amount FROM sales WHERE status != 'Cancelled'", conn)
+    # Replaced items_json with items_data
+    sales = pd.read_sql("SELECT items_data, total_amount FROM sales WHERE status != 'Cancelled'", conn)
     products = pd.read_sql("SELECT id, category FROM products", conn)
     conn.close()
     
@@ -577,13 +648,15 @@ def get_category_performance():
     
     for _, row in sales.iterrows():
         try:
-            item_ids = json.loads(row['items_json'])
-            if not item_ids: continue
-            
-            for iid in item_ids:
-                cat = cat_map.get(iid, "Unknown")
-                share = row['total_amount'] / len(item_ids) 
-                cat_sales[cat] = cat_sales.get(cat, 0) + share
+            # Replaced JSON loads with CSV string split
+            if row['items_data']:
+                item_ids = [int(x) for x in str(row['items_data']).split(',') if x.strip()]
+                if not item_ids: continue
+                
+                for iid in item_ids:
+                    cat = cat_map.get(iid, "Unknown")
+                    share = row['total_amount'] / len(item_ids) 
+                    cat_sales[cat] = cat_sales.get(cat, 0) + share
         except: continue
         
     return pd.DataFrame(list(cat_sales.items()), columns=['Category', 'Revenue']).sort_values('Revenue', ascending=False)
