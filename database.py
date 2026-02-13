@@ -498,10 +498,15 @@ def seed_advanced_demo_data():
         c.execute("INSERT OR REPLACE INTO users (username, password_hash, role, full_name, status) VALUES (?, ?, ?, ?, 'Active')", (u, ph, r, n))
 
     # --- PROGRAMMATIC DEMO DATA GENERATION (NO CSV) ---
+    # Check if we have enough valid sales data. If less than 25, we assume data is insufficient or potentially broken.
     c.execute("SELECT count(*) FROM sales")
-    if c.fetchone()[0] < 10:
+    sales_count = c.fetchone()[0]
+
+    if sales_count < 25:
         c.execute("SELECT id, price FROM products")
         prods = c.fetchall()
+        # Remove invalid products if any
+        prods = [p for p in prods if p[0] is not None]
         
         # Consistent Customer List with Mandatory Names
         demo_customers = [
@@ -546,7 +551,11 @@ def seed_advanced_demo_data():
                 chosen = random.choices(prods, k=num_items)
                 
                 # IMPORTANT: Ensure items exist and we track IDs correctly for analytics
-                items_data_str = ",".join([str(x[0]) for x in chosen])
+                # Ensure no empty items data
+                item_ids = [str(x[0]) for x in chosen if x[0] is not None]
+                if not item_ids: continue
+                
+                items_data_str = ",".join(item_ids)
                 total = sum([x[1] for x in chosen])
                 
                 mode = random.choice(modes)
