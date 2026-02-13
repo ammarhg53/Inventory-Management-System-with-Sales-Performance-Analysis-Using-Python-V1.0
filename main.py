@@ -380,17 +380,34 @@ def pos_interface():
                     finalize_sale(total, "UPI")
 
         elif mode == 'Card':
-            st.info("💳 Card Payment Simulation")
+            st.info("💳 Enter Card Details")
+            # Added visible input fields for Card Payment
             col_cc1, col_cc2 = st.columns(2)
             with col_cc1:
-                cc_num = st.text_input("Card Number", max_chars=16)
+                cc_num = st.text_input("Card Number", max_chars=16, help="Enter 16-digit card number")
             with col_cc2:
-                cc_cvv = st.text_input("CVV", type="password", max_chars=4)
+                cc_cvv = st.text_input("CVV", type="password", max_chars=4, help="3 or 4 digit security code")
+            
+            col_cc3, col_cc4 = st.columns(2)
+            with col_cc3:
+                cc_holder = st.text_input("Card Holder Name", help="Name as on card")
+            with col_cc4:
+                cc_expiry = st.text_input("Expiry Date", placeholder="MM/YY", max_chars=5)
             
             if st.button("Process Transaction"):
-                with st.spinner("Processing..."):
-                    time.sleep(1.5)
-                    finalize_sale(total, "Card")
+                # Basic Validation Logic
+                if not cc_num or len(cc_num) < 13:
+                    st.error("Invalid Card Number")
+                elif not cc_cvv or len(cc_cvv) < 3:
+                    st.error("Invalid CVV")
+                elif not cc_holder:
+                    st.error("Card Holder Name is required")
+                elif not cc_expiry or "/" not in cc_expiry:
+                    st.error("Invalid Expiry Date format")
+                else:
+                    with st.spinner("Processing..."):
+                        time.sleep(1.5)
+                        finalize_sale(total, "Card")
 
         st.markdown("</div>", unsafe_allow_html=True)
 
