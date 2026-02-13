@@ -31,6 +31,7 @@ def init_db():
                   image_data BLOB)''')
     
     # Sales table - Stores transaction history
+    # We ensure items_data exists. If user has old DB, we might need to migrate.
     c.execute('''CREATE TABLE IF NOT EXISTS sales
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, 
                   timestamp TEXT, 
@@ -50,6 +51,16 @@ def init_db():
                   cancelled_by TEXT,
                   cancellation_timestamp TEXT)''')
     
+    # Migration Check: Ensure items_data column exists
+    try:
+        c.execute("SELECT items_data FROM sales LIMIT 1")
+    except sqlite3.OperationalError:
+        # Column missing, alter table
+        try:
+            c.execute("ALTER TABLE sales ADD COLUMN items_data TEXT")
+        except:
+            pass # Might fail if table is locked or other issue, but usually works
+
     c.execute('''CREATE TABLE IF NOT EXISTS system_settings
                  (key TEXT PRIMARY KEY, value TEXT)''')
 
@@ -460,6 +471,7 @@ def seed_advanced_demo_data():
     conn = get_connection()
     c = conn.cursor()
 
+    # 1. Seed Categories if empty
     demo_categories = [
         "Snacks", "Beverages", "Grocery", "Dairy", "Bakery", 
         "Frozen", "Personal Care", "Stationery", "Electronics", "Household"
@@ -467,6 +479,7 @@ def seed_advanced_demo_data():
     for cat in demo_categories:
         c.execute("INSERT OR IGNORE INTO categories (name) VALUES (?)", (cat,))
 
+    # 2. Seed Products if empty
     c.execute("SELECT count(*) FROM products")
     if c.fetchone()[0] < 50:
         demo_products = {
@@ -483,12 +496,12 @@ def seed_advanced_demo_data():
         }
         for cat, items in demo_products.items():
             for name, price, cost in items:
-                # Set initial stock high to prevent negative stock issues during random generation
                 stock = random.randint(200, 500) 
                 expiry = "NA"
                 c.execute("INSERT INTO products (name, category, price, stock, cost_price, last_restock_date, expiry_date) VALUES (?, ?, ?, ?, ?, ?, ?)",
                           (name, cat, price, stock, cost, datetime.now().strftime("%Y-%m-%d"), expiry))
     
+    # 3. Seed Users if empty
     demo_users = [
         ('admin', 'admin123', 'Admin', 'System Admin'),
         ('operator', 'pos123', 'Operator', 'POS Operator')
@@ -497,12 +510,11 @@ def seed_advanced_demo_data():
         ph = hashlib.sha256(p.encode()).hexdigest()
         c.execute("INSERT OR REPLACE INTO users (username, password_hash, role, full_name, status) VALUES (?, ?, ?, ?, 'Active')", (u, ph, r, n))
 
-    # --- PROGRAMMATIC DEMO DATA GENERATION (NO CSV) ---
-    # Check if we have enough valid sales data. If less than 25, we assume data is insufficient or potentially broken.
+    # 4. Seed Sales and Customers if sales are low
     c.execute("SELECT count(*) FROM sales")
     sales_count = c.fetchone()[0]
 
-    if sales_count < 25:
+    if sales_count < 10:
         c.execute("SELECT id, price FROM products")
         prods = c.fetchall()
         # Remove invalid products if any
@@ -533,7 +545,6 @@ def seed_advanced_demo_data():
             modes = ["Cash", "UPI", "Card"]
             operators = ["admin", "operator"]
             
-            # Helper to track customer metrics during generation
             cust_metrics = {mob: {'visits': 0, 'spend': 0} for mob, _, _ in demo_customers}
             
             # Generate 85 Sales
@@ -550,7 +561,6 @@ def seed_advanced_demo_data():
                 num_items = random.randint(1, 6)
                 chosen = random.choices(prods, k=num_items)
                 
-                # IMPORTANT: Ensure items exist and we track IDs correctly for analytics
                 # Ensure no empty items data
                 item_ids = [str(x[0]) for x in chosen if x[0] is not None]
                 if not item_ids: continue
@@ -573,7 +583,7 @@ def seed_advanced_demo_data():
                     cancelled_by = op
                     cancel_time = txn_time 
                 
-                # Insert Sale with Status and Cancellation fields
+                # Insert Sale
                 c.execute("""INSERT INTO sales (timestamp, total_amount, items_data, integrity_hash, 
                             operator, payment_mode, time_taken, pos_id, customer_mobile, 
                             tax_amount, discount_amount, coupon_applied, status, 
@@ -586,8 +596,7 @@ def seed_advanced_demo_data():
                     cust_metrics[cust_mob]['visits'] += 1
                     cust_metrics[cust_mob]['spend'] += total
                     
-                    # Decrement Stock (Since this is seed data, we update without the strict check to setup the initial state, 
-                    # but we seeded high stock initially so it shouldn't go negative)
+                    # Decrement Stock
                     for item in chosen:
                         c.execute("UPDATE products SET stock = stock - 1, sales_count = sales_count + 1 WHERE id=?", (item[0],))
 
@@ -596,7 +605,6 @@ def seed_advanced_demo_data():
                 spend = metrics['spend']
                 visits = metrics['visits']
                 
-                # Determine Segment
                 if spend > 50000: segment = "High-Value"
                 elif spend > 15000: segment = "Regular"
                 else: segment = "Occasional"
@@ -658,7 +666,7 @@ def get_cancellation_audit_log():
 
 def get_category_performance():
     conn = get_connection()
-    # Replaced items_json with items_data
+    # Using items_data as per schema
     sales = pd.read_sql("SELECT items_data, total_amount FROM sales WHERE status != 'Cancelled'", conn)
     products = pd.read_sql("SELECT id, category FROM products", conn)
     conn.close()
@@ -668,7 +676,6 @@ def get_category_performance():
     
     for _, row in sales.iterrows():
         try:
-            # Replaced JSON loads with CSV string split
             if row['items_data']:
                 item_ids = [int(x) for x in str(row['items_data']).split(',') if x.strip()]
                 if not item_ids: continue
