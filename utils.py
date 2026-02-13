@@ -11,7 +11,6 @@ import urllib.parse
 from datetime import datetime, timedelta
 import shutil
 import os
-import json
 from PIL import Image
 import re
 
@@ -86,16 +85,11 @@ def validate_mobile_number(number_str, country_code):
     normalized = f"{country_code}{clean_num}"
     return True, normalized, "Valid"
 
-
-
-
+# --- HASHING HELPER ---
 def generate_hash(data_string):
     return hashlib.sha256(data_string.encode()).hexdigest()
 
-def generate_integrity_hash(txn_data):
-    return "DISABLED"
-
-# --- TRIE ---
+# --- TRIE SEARCH ALGORITHM ---
 class TrieNode:
     def __init__(self):
         self.children = {}
@@ -195,12 +189,15 @@ def rank_products(df_sales, df_products):
     else:
         active_sales = df_sales
 
-    import json
+    # Replaced JSON parsing with simple CSV string split
     all_items = []
     for _, row in active_sales.iterrows():
         try:
-            ids = json.loads(row['items_json'])
-            all_items.extend(ids)
+            # Check if we have data and it's not empty
+            if row['items_data']:
+                # Split the comma-separated string into IDs
+                ids = [int(x) for x in str(row['items_data']).split(',') if x.strip()]
+                all_items.extend(ids)
         except: continue
         
     from collections import Counter
@@ -246,7 +243,6 @@ def calculate_profit_loss(df_sales, df_products):
     """
     Calculates P&L for Enhanced Statement.
     Gross Revenue = Sum of List Prices of sold items
-    Marketing Expense = 0 (Fixed Rule)
     Net Revenue = Gross Revenue
     Profit = Net Revenue - COGS
     """
@@ -258,8 +254,7 @@ def calculate_profit_loss(df_sales, df_products):
     else:
         active_sales = df_sales
 
-    # Marketing Expense must be 0
-    marketing_expense = 0
+
 
     prod_map = df_products.set_index('id')[['name', 'category', 'cost_price', 'price']].to_dict('index')
     
@@ -269,29 +264,29 @@ def calculate_profit_loss(df_sales, df_products):
 
     for _, row in active_sales.iterrows():
         try:
-            items = json.loads(row['items_json'])
-            for pid in items:
-                if pid in prod_map:
-                    p = prod_map[pid]
-                    cp = p['cost_price']
-                    sp = p['price']
-                    
-                    gross_rev += sp # Gross is sum of list prices
-                    total_cost += cp
-                    
-                    # Category breakdown
-                    profit_gross = sp - cp
-                    
-                    cat = p['category']
-                    if cat not in category_pl:
-                        category_pl[cat] = {'revenue': 0, 'cost': 0, 'profit': 0}
-                    category_pl[cat]['revenue'] += sp
-                    category_pl[cat]['cost'] += cp
-                    category_pl[cat]['profit'] += profit_gross
+            if row['items_data']:
+                items = [int(x) for x in str(row['items_data']).split(',') if x.strip()]
+                for pid in items:
+                    if pid in prod_map:
+                        p = prod_map[pid]
+                        cp = p['cost_price']
+                        sp = p['price']
+                        
+                        gross_rev += sp # Gross is sum of list prices
+                        total_cost += cp
+                        
+                        # Category breakdown
+                        profit_gross = sp - cp
+                        
+                        cat = p['category']
+                        if cat not in category_pl:
+                            category_pl[cat] = {'revenue': 0, 'cost': 0, 'profit': 0}
+                        category_pl[cat]['revenue'] += sp
+                        category_pl[cat]['cost'] += cp
+                        category_pl[cat]['profit'] += profit_gross
                     
         except: continue
 
-    # Net Revenue is Gross Revenue (since marketing is 0)
     net_revenue = gross_rev 
     net_profit = net_revenue - total_cost
     
@@ -324,18 +319,13 @@ def backup_system():
         return None
 
 class PDFReceipt(FPDF):
-    def __init__(self, store_name, logo_path=None):
+    def __init__(self, store_name):
         super().__init__()
         self.store_name = store_name
-        self.logo_path = logo_path
+        # Logo logic removed
 
     def header(self):
-        if self.logo_path and os.path.exists(self.logo_path):
-            try:
-                self.image(self.logo_path, 10, 8, 25)
-                self.set_xy(40, 10)
-            except: pass
-        
+        # Header Logo logic removed
         self.set_font('Arial', 'B', 15)
         self.cell(0, 10, self.store_name, 0, 1, 'C')
         self.set_font('Arial', '', 9)
@@ -348,9 +338,9 @@ class PDFReceipt(FPDF):
         self.cell(0, 10, f'Page {self.page_no()}', 0, 0, 'C')
 
 def generate_receipt_pdf(store_name, txn_id, time_str, items, total, operator, mode, pos, customer=None, tax_info=None, new_coupon=None):
-    logo_path = "logo.png" if os.path.exists("logo.png") else None
+    # Removed Logo Path Logic
     
-    pdf = PDFReceipt(store_name, logo_path)
+    pdf = PDFReceipt(store_name)
     pdf.add_page()
     
     pdf.set_font("Arial", size=10)
