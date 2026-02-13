@@ -7,10 +7,12 @@ import numpy as np
 from datetime import datetime, timedelta
 import os
 
+# Internal modules
 import database as db
 import utils
 import styles
 
+# --- APP CONFIGURATION ---
 st.set_page_config(
     page_title="POS System", 
     layout="wide", 
@@ -771,62 +773,132 @@ def marketing_hub():
 def orders_page():
     st.title("📜 Order & Payment Details")
     
-    st.markdown("<div class='card-container'>", unsafe_allow_html=True)
-    st.subheader("🔍 Search & Filters")
-    c1, c2 = st.columns(2)
-    f_id = c1.number_input("Order ID", min_value=0, value=0)
-    f_op = c2.text_input("Customer Mobile")
+    tab_orders, tab_customers = st.tabs(["Transaction History", "Customer Database"])
     
-    filters = {}
-    if f_id > 0: filters['bill_no'] = f_id
-    
-    # Updated: Removed POS ID logic, added Customer columns in display
-    txns = db.get_transaction_history(filters)
-    
-    # If the user searched by Mobile, filter client-side if the query doesn't handle it fully 
-    # (The query in db filters by operator, we can filter by mobile here if needed, but db.get_transaction_history handles filtering by mobile if operator filter logic was meant for it? 
-    # Actually the input says 'Customer Mobile' but the code used it for 'operator' param in filters. I'll check previous code.
-    # Previous code passed f_op to filters['operator']. Let's correct this filter logic visually here or assumes DB handles it.
-    # The new DB query returns customer_mobile. I will filter dataframe here for simplicity if db query isn't perfect for mobile search)
-    if f_op and not txns.empty:
-        txns = txns[txns['customer_mobile'].astype(str).str.contains(f_op, na=False)]
-    
-    # Clean Columns for Display
-    if not txns.empty:
-        # Select columns to show
-        # ID, Date, Amount, Method, Operator, Cust Name, Cust Email, Cust Mobile, Status
-        display_df = txns[['id', 'timestamp', 'total_amount', 'payment_mode', 'operator', 
-                           'customer_name', 'customer_email', 'customer_mobile', 'status']]
-        display_df.columns = ["Order ID", "Date", "Total", "Method", "Cashier", 
-                              "Customer Name", "Customer Email", "Mobile", "Status"]
-        st.dataframe(display_df, use_container_width=True)
-    else:
-        st.info("No records found.")
-    
-    st.markdown("---")
-    st.subheader("❌ Cancel Order (Admin Only)")
-    with st.form("cancel_order_form"):
-        c_oid = st.number_input("Order ID to Cancel", min_value=1, step=1)
-        c_reason = st.text_input("Cancellation Reason (Mandatory)")
-        c_pass = st.text_input("Admin Password to Confirm", type="password")
+    with tab_orders:
+        st.markdown("<div class='card-container'>", unsafe_allow_html=True)
+        st.subheader("🔍 Search & Filters")
+        c1, c2 = st.columns(2)
+        f_id = c1.number_input("Order ID", min_value=0, value=0)
+        f_op = c2.text_input("Customer Mobile")
         
-        if st.form_submit_button("🚨 Cancel Order"):
-            if not c_reason.strip(): # Added validation
-                st.error("Reason is mandatory.")
-            else:
-                success, msg = db.cancel_sale_transaction(c_oid, st.session_state['user'], st.session_state['role'], c_reason, c_pass)
-                if success:
-                    st.success(msg)
-                    time.sleep(1)
-                    st.rerun()
+        filters = {}
+        if f_id > 0: filters['bill_no'] = f_id
+        
+        # Updated: Removed POS ID logic, added Customer columns in display
+        txns = db.get_transaction_history(filters)
+        
+        # If the user searched by Mobile, filter client-side if the query doesn't handle it fully 
+        if f_op and not txns.empty:
+            txns = txns[txns['customer_mobile'].astype(str).str.contains(f_op, na=False)]
+        
+        # Clean Columns for Display
+        if not txns.empty:
+            # Select columns to show
+            # ID, Date, Amount, Method, Operator, Cust Name, Cust Email, Cust Mobile, Status
+            display_df = txns[['id', 'timestamp', 'total_amount', 'payment_mode', 'operator', 
+                            'customer_name', 'customer_email', 'customer_mobile', 'status']]
+            display_df.columns = ["Order ID", "Date", "Total", "Method", "Cashier", 
+                                "Customer Name", "Customer Email", "Mobile", "Status"]
+            st.dataframe(display_df, use_container_width=True)
+        else:
+            st.info("No records found.")
+        
+        st.markdown("---")
+        st.subheader("❌ Cancel Order (Admin Only)")
+        with st.form("cancel_order_form"):
+            c_oid = st.number_input("Order ID to Cancel", min_value=1, step=1)
+            c_reason = st.text_input("Cancellation Reason (Mandatory)")
+            c_pass = st.text_input("Admin Password to Confirm", type="password")
+            
+            if st.form_submit_button("🚨 Cancel Order"):
+                if not c_reason.strip(): # Added validation
+                    st.error("Reason is mandatory.")
                 else:
-                    st.error(msg)
-    
-    st.markdown("---")
-    st.subheader("🚫 Cancelled Orders Audit")
-    cancels = db.get_cancellation_audit_log()
-    st.dataframe(cancels, use_container_width=True)
-    st.markdown("</div>", unsafe_allow_html=True)
+                    success, msg = db.cancel_sale_transaction(c_oid, st.session_state['user'], st.session_state['role'], c_reason, c_pass)
+                    if success:
+                        st.success(msg)
+                        time.sleep(1)
+                        st.rerun()
+                    else:
+                        st.error(msg)
+        
+        st.markdown("---")
+        st.subheader("🚫 Cancelled Orders Audit")
+        cancels = db.get_cancellation_audit_log()
+        st.dataframe(cancels, use_container_width=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+        
+    with tab_customers:
+        st.markdown("<div class='card-container'>", unsafe_allow_html=True)
+        st.subheader("👥 Customer Database")
+        
+        # Fetch all customers
+        customers = db.get_all_customers()
+        sales_data = db.get_sales_data()
+        conn = db.get_connection()
+        products = pd.read_sql("SELECT * FROM products", conn)
+        conn.close()
+        
+        if not customers.empty and not sales_data.empty:
+            # Calculate metrics per customer
+            cust_list = []
+            
+            # Create product cost map for profit calc
+            prod_cost_map = products.set_index('id')['cost_price'].to_dict()
+            prod_price_map = products.set_index('id')['price'].to_dict()
+            
+            for index, cust in customers.iterrows():
+                mob = cust['mobile']
+                cust_sales = sales_data[sales_data['customer_mobile'] == mob]
+                
+                total_visits = len(cust_sales)
+                cancelled_orders = len(cust_sales[cust_sales['status'] == 'Cancelled'])
+                completed_orders = len(cust_sales[cust_sales['status'] == 'Completed'])
+                total_spend = cust_sales[cust_sales['status'] == 'Completed']['total_amount'].sum()
+                
+                # Calculate Profit
+                total_profit = 0
+                for _, sale in cust_sales[cust_sales['status'] == 'Completed'].iterrows():
+                    try:
+                        if sale['items_data']:
+                            item_ids = [int(x) for x in str(sale['items_data']).split(',') if x.strip()]
+                            for iid in item_ids:
+                                if iid in prod_cost_map and iid in prod_price_map:
+                                    total_profit += (prod_price_map[iid] - prod_cost_map[iid])
+                    except:
+                        continue
+                
+                cust_list.append({
+                    "Name": cust['name'],
+                    "Email": cust['email'] if cust['email'] else "N/A",
+                    "Mobile": mob,
+                    "Total Spend": total_spend,
+                    "Total Profit": total_profit,
+                    "Total Visits": total_visits,
+                    "Cancelled Orders": cancelled_orders
+                })
+            
+            df_cust_view = pd.DataFrame(cust_list)
+            st.dataframe(df_cust_view, use_container_width=True)
+            
+            # Summary Section
+            st.markdown("---")
+            st.markdown("#### 📈 Customer Summary")
+            
+            summ_cols = st.columns(4)
+            summ_cols[0].metric("Total Customers", len(customers))
+            summ_cols[1].metric("Total Completed Orders", df_cust_view["Total Visits"].sum() - df_cust_view["Cancelled Orders"].sum())
+            summ_cols[2].metric("Total Cancelled Orders", df_cust_view["Cancelled Orders"].sum())
+            
+            # Retention: Customers with > 1 visit
+            repeat_cust = len(df_cust_view[df_cust_view["Total Visits"] > 1])
+            summ_cols[3].metric("Returning Customers", repeat_cust)
+            
+        else:
+            st.info("No customer data available.")
+            
+        st.markdown("</div>", unsafe_allow_html=True)
 
 def admin_panel():
     st.title("⚙️ Admin Settings")
