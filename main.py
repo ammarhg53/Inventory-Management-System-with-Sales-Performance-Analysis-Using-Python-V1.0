@@ -1,6 +1,5 @@
 import streamlit as st
 import pandas as pd
-import json
 import time
 import random
 import matplotlib.pyplot as plt
@@ -8,12 +7,10 @@ import numpy as np
 from datetime import datetime, timedelta
 import os
 
-# Internal modules
 import database as db
 import utils
 import styles
 
-# --- APP CONFIGURATION ---
 st.set_page_config(
     page_title="POS System", 
     layout="wide", 
@@ -45,7 +42,7 @@ if 'initialized' not in st.session_state:
     st.session_state['current_customer'] = None
     st.session_state['bill_mode'] = None
     st.session_state['applied_coupon'] = None
-    st.session_state['points_to_redeem'] = 0
+    # Removed points_to_redeem session state
 
     # Session State for Forms
     st.session_state['clear_inventory_form'] = False
@@ -91,7 +88,7 @@ def login_view():
         submit = st.form_submit_button("Access System", type="primary", use_container_width=True)
         
         if submit:
-            if not user_in or not pass_in:
+            if not user_in.strip() or not pass_in.strip(): # Added strict validation
                 st.error("Fields cannot be empty")
                 return
             
@@ -192,7 +189,7 @@ def pos_interface():
                     new_email = st.text_input("Email ID (Optional)")
                     
                     if st.form_submit_button("Save Customer"):
-                        if not new_name:
+                        if not new_name.strip(): # Added validation
                             st.error("Customer Name is mandatory.")
                         else:
                             # Validate Email only if entered
@@ -279,7 +276,7 @@ def pos_interface():
                 discount = 0
                 fest_disc = 0 
                 
-                # No Points Redemption
+                # Removed Points Redemption Logic
                 total_after_disc = max(0, raw_total - discount - fest_disc)
                 
                 gst_enabled = db.get_setting("gst_enabled") == 'True'
@@ -411,7 +408,7 @@ def pos_interface():
                 st.session_state['current_customer'] = None
                 st.session_state['checkout_stage'] = 'cart'
                 st.session_state['applied_coupon'] = None
-                st.session_state['points_to_redeem'] = 0
+                # Removed points_to_redeem reset
                 st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -422,16 +419,16 @@ def finalize_sale(total, mode):
     customer = st.session_state['current_customer']
     customer_mobile = customer['mobile'] if customer else None
     
-    points_earned = 0
-    if customer:
-        points_earned = utils.calculate_loyalty_points(total)
+    # Removed Loyalty Points Calculation (points_earned)
     
-    items_json = json.dumps([i['id'] for i in st.session_state['cart']])
+    # Replaced JSON dumps with simple list comprehension logic for DB function
+    # db.process_sale_transaction handles the string conversion internally now
+    
     # Internal logic removed from hash generation conceptually, just passing placeholders
     integrity_hash = "NA"
     
     try:
-        # Calls db.process_sale_transaction without coupon args
+        # Calls db.process_sale_transaction without coupon args and without points
         sale_id = db.process_sale_transaction(
             st.session_state['cart'],
             total,
@@ -440,8 +437,6 @@ def finalize_sale(total, mode):
             st.session_state['pos_id'],
             customer_mobile,
             calc['tax'],
-            calc['points'],
-            points_earned,
             integrity_hash,
             30 
         )
@@ -487,12 +482,14 @@ def inventory_manager():
             with c_m1:
                 new_cat_name = st.text_input("New Category Name")
                 if st.button("Add Category"):
-                    if new_cat_name:
+                    if new_cat_name.strip(): # Added validation
                         if db.add_category(new_cat_name):
                             st.success(f"Added {new_cat_name}")
                             time.sleep(1)
                             st.rerun()
                         else: st.error("Failed or already exists")
+                    else:
+                         st.error("Category name cannot be empty.")
             with c_m2:
                 cat_to_del = st.selectbox("Delete Category", db.get_categories_list(), key="del_cat_sel")
                 if st.button("Delete"):
@@ -504,20 +501,19 @@ def inventory_manager():
                 cat_rename_from = st.selectbox("Rename From", db.get_categories_list(), key="ren_cat_sel")
                 cat_rename_to = st.text_input("Rename To")
                 if st.button("Rename"):
-                    db.rename_category(cat_rename_from, cat_rename_to)
-                    st.success("Renamed")
-                    time.sleep(1)
-                    st.rerun()
+                    if cat_rename_to.strip(): # Added validation
+                        db.rename_category(cat_rename_from, cat_rename_to)
+                        st.success("Renamed")
+                        time.sleep(1)
+                        st.rerun()
+                    else:
+                        st.error("New Category name cannot be empty.")
 
         st.markdown("<div class='card-container'>", unsafe_allow_html=True)
         
         # Checking for form clearance
         if st.session_state.get('clear_inventory_form'):
             st.session_state['clear_inventory_form'] = False
-            # Rerun logic handled by clearing widgets below? 
-            # Streamlit forms don't clear nicely on command without session state hacks
-            # Using st.form with clear_on_submit=False for manual control logic or True for auto
-            # Requested: On success: Clear. On error: Show error (don't clear).
             
         with st.form("new_prod"):
             n = st.text_input("Product Name")
@@ -532,13 +528,12 @@ def inventory_manager():
             if submit_prod:
                 if s < 0:
                     st.error("Stock quantity cannot be negative.")
-                elif not n:
+                elif not n.strip(): # Added validation
                     st.error("Product Name is required.")
                 else:
                     img_bytes = img_file.getvalue() if img_file else None
                     if db.add_product(n, c, p, s, cp, None, img_bytes):
                         st.success(f"Product '{n}' Added Successfully!")
-                        # To clear the form, we need to rerun. 
                         time.sleep(1)
                         st.rerun()
                     else: 
@@ -601,19 +596,21 @@ def analytics_dashboard():
 
     for _, row in df_sales.iterrows():
         try:
-            ids = json.loads(row['items_json'])
-            for pid in ids:
-                if pid in prod_dict:
-                    p = prod_dict[pid]
-                    items_list.append({
-                        'sale_id': row['id'],
-                        'timestamp': row['timestamp'],
-                        'product_name': p['name'],
-                        'category': p['category'],
-                        'selling_price': p['price'],
-                        'cost_price': p['cost_price'],
-                        'profit': p['price'] - p['cost_price']
-                    })
+            # Replaced JSON loads with CSV string split
+            if row['items_data']:
+                ids = [int(x) for x in str(row['items_data']).split(',') if x.strip()]
+                for pid in ids:
+                    if pid in prod_dict:
+                        p = prod_dict[pid]
+                        items_list.append({
+                            'sale_id': row['id'],
+                            'timestamp': row['timestamp'],
+                            'product_name': p['name'],
+                            'category': p['category'],
+                            'selling_price': p['price'],
+                            'cost_price': p['cost_price'],
+                            'profit': p['price'] - p['cost_price']
+                        })
         except:
             continue
     
@@ -814,7 +811,7 @@ def orders_page():
         c_pass = st.text_input("Admin Password to Confirm", type="password")
         
         if st.form_submit_button("🚨 Cancel Order"):
-            if not c_reason:
+            if not c_reason.strip(): # Added validation
                 st.error("Reason is mandatory.")
             else:
                 success, msg = db.cancel_sale_transaction(c_oid, st.session_state['user'], st.session_state['role'], c_reason, c_pass)
@@ -843,14 +840,17 @@ def admin_panel():
         with col_s2: s_gst_enable = st.checkbox("Enable GST", value=(db.get_setting("gst_enabled") == 'True'))
         
         if st.form_submit_button("Save Settings"):
-            db.set_setting("store_name", s_name)
-            db.set_setting("upi_id", s_upi)
-            db.set_setting("tax_rate", str(s_tax))
-            db.set_setting("gst_enabled", str(s_gst_enable))
-            db.log_activity(st.session_state['user'], "Settings Update", "Modified")
-            st.success("Settings Saved!")
-            time.sleep(1)
-            st.rerun()
+            if not s_name.strip() or not s_upi.strip(): # Added validation
+                st.error("Store Name and UPI ID cannot be empty.")
+            else:
+                db.set_setting("store_name", s_name)
+                db.set_setting("upi_id", s_upi)
+                db.set_setting("tax_rate", str(s_tax))
+                db.set_setting("gst_enabled", str(s_gst_enable))
+                db.log_activity(st.session_state['user'], "Settings Update", "Modified")
+                st.success("Settings Saved!")
+                time.sleep(1)
+                st.rerun()
     
     st.markdown("---")
     st.subheader("👤 Create New Operator")
@@ -859,8 +859,13 @@ def admin_panel():
         new_op_user = st.text_input("Username").strip().lower()
         new_op_pass = st.text_input("Password", type="password")
         
+        # Integration of password strength
+        if new_op_pass:
+            s_score, s_label, s_color = utils.check_password_strength(new_op_pass)
+            st.markdown(f"<small style='color:{s_color}'>Strength: {s_label}</small>", unsafe_allow_html=True)
+        
         if st.form_submit_button("Create Operator"):
-            if not new_op_name or not new_op_user or not new_op_pass:
+            if not new_op_name.strip() or not new_op_user.strip() or not new_op_pass.strip(): # Added strict validation
                 st.error("All fields are mandatory.")
             else:
                 if db.create_user(new_op_user, new_op_pass, "Operator", new_op_name):
@@ -875,22 +880,48 @@ def admin_panel():
 def user_profile_page():
     st.title("👤 My Profile")
     st.markdown("<div class='card-container'>", unsafe_allow_html=True)
+    
+    # Update Name
     with st.form("profile_upd"):
         new_name = st.text_input("Full Name", value=st.session_state['full_name'])
         if st.form_submit_button("Update Profile"):
-            db.update_fullname(st.session_state['user'], new_name)
-            st.session_state['full_name'] = new_name
-            st.success("Updated")
+            if not new_name or not new_name.strip():
+                st.error("Full Name cannot be empty")
+            else:
+                db.update_fullname(st.session_state['user'], new_name.strip())
+                st.session_state['full_name'] = new_name.strip()
+                st.success("Updated Successfully")
+
     st.divider()
     st.subheader("Change Password")
-    with st.form("pass_chg"):
-        old_p = st.text_input("Old Password", type="password")
-        new_p = st.text_input("New Password", type="password")
-        if st.form_submit_button("Change Password"):
-            if db.verify_password(st.session_state['user'], old_p):
-                db.update_password(st.session_state['user'], new_p)
-                st.success("Password Changed")
-            else: st.error("Incorrect Old Password")
+    
+    # Change Password - No Form to allow Real-Time Strength Meter
+    if 'p_old' not in st.session_state: st.session_state['p_old'] = ""
+    if 'p_new' not in st.session_state: st.session_state['p_new'] = ""
+
+    old_p = st.text_input("Old Password", type="password", key="p_old")
+    new_p = st.text_input("New Password", type="password", key="p_new")
+    
+    # Strength Indicator
+    if new_p:
+        score, label, color = utils.check_password_strength(new_p)
+        st.markdown(f"**Strength:** <span style='color:{color}; font-weight:bold'>{label}</span>", unsafe_allow_html=True)
+        st.progress(min(score / 4, 1.0))
+    
+    if st.button("Change Password"):
+        if not old_p.strip() or not new_p.strip():
+            st.error("Password fields cannot be empty")
+        elif db.verify_password(st.session_state['user'], old_p):
+            db.update_password(st.session_state['user'], new_p)
+            st.success("Password Changed Successfully")
+            # Clear fields
+            st.session_state['p_old'] = ""
+            st.session_state['p_new'] = ""
+            time.sleep(0.5)
+            st.rerun()
+        else:
+            st.error("Incorrect Old Password")
+
     st.markdown("</div>", unsafe_allow_html=True)
 
 # --- MAIN CONTROLLER ---
