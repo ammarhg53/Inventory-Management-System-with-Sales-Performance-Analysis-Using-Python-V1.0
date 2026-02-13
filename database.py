@@ -4,7 +4,7 @@ import random
 from datetime import datetime, timedelta
 import hashlib
 import os
-import csv
+from collections import Counter
 
 DB_NAME = "inventory_system.db"
 
@@ -31,8 +31,6 @@ def init_db():
                   image_data BLOB)''')
     
     # Sales table - Stores transaction history
-    # items_data column stores item IDs as a comma-separated string (e.g. "1,2,5")
-    # Removed loyalty points columns and renamed items_json to items_data for clarity
     c.execute('''CREATE TABLE IF NOT EXISTS sales
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, 
                   timestamp TEXT, 
@@ -69,9 +67,7 @@ def init_db():
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT, 
                   user TEXT, action TEXT, details TEXT)''')
     
-    # Customers table - Removed loyalty_points and total_spend (kept total_spend for basic tracking if needed, but removed points)
-    # Actually prompt says "Remove loyalty points calculation logic". 
-    # I will keep total_spend as it's general, but remove loyalty_points.
+    # Customers table
     c.execute('''CREATE TABLE IF NOT EXISTS customers
                  (mobile TEXT PRIMARY KEY, 
                   name TEXT, 
@@ -145,27 +141,35 @@ def log_activity(user, action, details):
 def process_sale_transaction(cart_items, total, mode, operator, pos_id, customer_mobile, 
                              tax_amount, integrity_hash, time_taken):
     """
-    Saves a sales transaction.
-    Replaced items_json with items_data (comma separated string).
-    Removed loyalty points arguments and logic.
+    Saves a sales transaction with strict stock validation.
     """
     conn = get_connection()
     c = conn.cursor()
     sale_id = None
     try:
-        # Decrease stock for sold items
-        for item in cart_items:
-            c.execute("UPDATE products SET stock = stock - 1, sales_count = sales_count + 1 WHERE id=?", (item['id'],))
+        # 1. STRICT STOCK VALIDATION
+        # Calculate required quantities per product ID
+        item_ids = [i['id'] for i in cart_items]
+        req_counts = Counter(item_ids)
+
+        for pid, qty in req_counts.items():
+            c.execute("SELECT stock, name FROM products WHERE id=?", (pid,))
+            row = c.fetchone()
+            if not row:
+                raise Exception(f"Product ID {pid} not found in database.")
+            
+            curr_stock, p_name = row
+            if curr_stock < qty:
+                raise Exception(f"Insufficient stock for '{p_name}'. Available: {curr_stock}, Required: {qty}. Sale blocked.")
+
+        # 2. Update Stock (Only if validation passes)
+        for pid, qty in req_counts.items():
+            c.execute("UPDATE products SET stock = stock - ?, sales_count = sales_count + ? WHERE id=?", (qty, qty, pid))
         
-        # Convert list of item IDs to a simple comma-separated string
-        # e.g., [10, 25, 30] becomes "10,25,30"
-        item_ids = [str(i['id']) for i in cart_items]
-        items_data_str = ",".join(item_ids)
-        
+        # 3. Create Sales Record
+        items_data_str = ",".join([str(pid) for pid in item_ids])
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
-        # Insert with 0 discount and NULL coupon
-        # Removed points_redeemed from INSERT
         c.execute("""INSERT INTO sales (timestamp, total_amount, items_data, integrity_hash, 
                      operator, payment_mode, time_taken, pos_id, customer_mobile, 
                      tax_amount, discount_amount, coupon_applied) 
@@ -174,9 +178,9 @@ def process_sale_transaction(cart_items, total, mode, operator, pos_id, customer
                  pos_id, customer_mobile, tax_amount))
         sale_id = c.lastrowid
 
+        # 4. Update Customer Metrics
         if customer_mobile:
             customer_mobile = customer_mobile.strip()
-            # Removed loyalty_points from SELECT and UPDATE
             c.execute("SELECT total_spend FROM customers WHERE mobile=?", (customer_mobile,))
             res = c.fetchone()
             if res:
@@ -213,7 +217,6 @@ def cancel_sale_transaction(sale_id, operator, role, reason, password):
         if not c.fetchone():
             return False, "Invalid Password. Identity verification failed."
 
-        # Fetch items_data instead of items_json
         c.execute("SELECT items_data, status, operator, total_amount, timestamp, customer_mobile FROM sales WHERE id=?", (sale_id,))
         res = c.fetchone()
         if not res:
@@ -259,12 +262,6 @@ def get_customer(mobile):
     row = c.fetchone()
     conn.close()
     if row:
-        # Schema change might have shifted indices, fetch by name is safer but for simplicity using indices based on CREATE TABLE
-        # 0:mobile, 1:name, 2:email, 3:visits, 4:total_spend, 5:segment (loyalty_points removed)
-        # Assuming table recreated or strict adherence to indices of the new CREATE statement above:
-        # If user has old DB file, this might crash. But user is developer, so expected.
-        # Adjusted indices: 
-        # 0:mobile, 1:name, 2:email, 3:visits, 4:total_spend, 5:segment
         seg = row[5] if len(row) > 5 and row[5] is not None else 'New'
         return {"mobile": row[0], "name": row[1], "email": row[2], "visits": row[3], "total_spend": row[4], "segment": seg}
     return None
@@ -278,7 +275,6 @@ def upsert_customer(mobile, name, email):
     if res:
         c.execute("UPDATE customers SET name=?, email=? WHERE mobile=?", (name, email, mobile))
     else:
-        # Removed loyalty_points from INSERT
         c.execute("INSERT INTO customers (mobile, name, email, visits, total_spend, segment) VALUES (?, ?, ?, 0, 0, 'New')", (mobile, name, email))
     conn.commit()
     conn.close()
@@ -456,6 +452,11 @@ def get_sales_data():
     return df
 
 def seed_advanced_demo_data():
+    """
+    Generates realistic demo data DIRECTLY in the database.
+    Does NOT use CSV files.
+    Ensures data consistency and stock availability.
+    """
     conn = get_connection()
     c = conn.cursor()
 
@@ -482,7 +483,8 @@ def seed_advanced_demo_data():
         }
         for cat, items in demo_products.items():
             for name, price, cost in items:
-                stock = random.randint(20, 100)
+                # Set initial stock high to prevent negative stock issues during random generation
+                stock = random.randint(200, 500) 
                 expiry = "NA"
                 c.execute("INSERT INTO products (name, category, price, stock, cost_price, last_restock_date, expiry_date) VALUES (?, ?, ?, ?, ?, ?, ?)",
                           (name, cat, price, stock, cost, datetime.now().strftime("%Y-%m-%d"), expiry))
@@ -495,115 +497,104 @@ def seed_advanced_demo_data():
         ph = hashlib.sha256(p.encode()).hexdigest()
         c.execute("INSERT OR REPLACE INTO users (username, password_hash, role, full_name, status) VALUES (?, ?, ?, ?, 'Active')", (u, ph, r, n))
 
-    # --- UPDATED DUMMY DATA IMPORT ---
-    # Check for demo_data.csv and import if sales table is empty
+    # --- PROGRAMMATIC DEMO DATA GENERATION (NO CSV) ---
     c.execute("SELECT count(*) FROM sales")
     if c.fetchone()[0] < 10:
+        c.execute("SELECT id, price FROM products")
+        prods = c.fetchall()
         
-        # Priority: Import from CSV if exists
-        csv_file = "demo_data.csv"
-        imported_from_csv = False
+        # Consistent Customer List with Mandatory Names
+        demo_customers = [
+            ("+919876500001", "Amit Sharma", "amit.s@example.com"),
+            ("+919876500002", "Priya Singh", "priya.s@example.com"),
+            ("+919876500003", "Rahul Verma", "rahul.v@example.com"),
+            ("+919876500004", "Vikram Malhotra", "vikram.m@example.com"),
+            ("+919876500005", "Sneha Kapoor", "sneha.k@example.com"),
+            ("+919876500006", "Arjun Das", "arjun.d@example.com"),
+            ("+919876500007", "Riya Gupta", "riya.g@example.com"),
+            ("+919876500008", "Karan Johar", "karan.j@example.com"),
+            ("+919876500009", "Meera Reddy", "meera.r@example.com"),
+            ("+919876500010", "Suresh Raina", "suresh.r@example.com"),
+            ("+919876500011", "Anjali Mehta", "anjali.m@example.com"),
+            ("+919876500012", "Kabir Singh", "kabir.s@example.com")
+        ]
         
-        if os.path.exists(csv_file):
-            try:
-                with open(csv_file, 'r') as f:
-                    reader = csv.DictReader(f)
-                    
-                    # Track metrics for customer updates
-                    cust_metrics = {} 
-                    
-                    for row in reader:
-                        # Insert Customer if not exists
-                        mob = row['customer_mobile']
-                        name = row['customer_name']
-                        email = row['customer_email']
-                        
-                        c.execute("INSERT OR IGNORE INTO customers (mobile, name, email, segment, visits, total_spend) VALUES (?, ?, ?, 'New', 0, 0)", 
-                                  (mob, name, email))
-                        
-                        if mob not in cust_metrics:
-                            cust_metrics[mob] = {'visits': 0, 'spend': 0}
-                            
-                        # Insert Sale
-                        c.execute("""INSERT INTO sales (timestamp, total_amount, items_data, integrity_hash, 
-                                    operator, payment_mode, time_taken, pos_id, customer_mobile, 
-                                    tax_amount, discount_amount, coupon_applied, status, 
-                                    cancellation_reason, cancelled_by, cancellation_timestamp) 
-                                    VALUES (?,?,?, 'DUMMY', ?, ?, 45, 'POS-1', ?, 0, 0, NULL, ?, ?, ?, ?)""",
-                                (row['timestamp'], float(row['total_amount']), row['items_data'], row['operator'], row['payment_mode'], 
-                                 mob, row['status'], row['cancellation_reason'], 
-                                 row['operator'] if row['status'] == 'Cancelled' else None, 
-                                 row['timestamp'] if row['status'] == 'Cancelled' else None))
-                        
-                        # Update local metrics
-                        if row['status'] == 'Completed':
-                            cust_metrics[mob]['visits'] += 1
-                            cust_metrics[mob]['spend'] += float(row['total_amount'])
-                            
-                    # Update Customer Tables
-                    for mob, metrics in cust_metrics.items():
-                        spend = metrics['spend']
-                        visits = metrics['visits']
-                        
-                        if spend > 50000: segment = "High-Value"
-                        elif spend > 15000: segment = "Regular"
-                        else: segment = "Occasional"
-                        if visits == 0: segment = "New"
-
-                        c.execute("UPDATE customers SET visits=?, total_spend=?, segment=? WHERE mobile=?",
-                                  (visits, spend, segment, mob))
-                                  
-                    imported_from_csv = True
-            except Exception as e:
-                print(f"Error importing CSV: {e}")
+        # Seed Customers
+        for mob, name, email in demo_customers:
+            c.execute("INSERT OR IGNORE INTO customers (mobile, name, email, segment, visits, total_spend) VALUES (?, ?, ?, 'New', 0, 0)", 
+                      (mob, name, email))
         
-        # Fallback to programmatic generation if CSV failed or didn't exist
-        if not imported_from_csv:
-            c.execute("SELECT id, price FROM products")
-            prods = c.fetchall()
+        if prods:
+            modes = ["Cash", "UPI", "Card"]
+            operators = ["admin", "operator"]
             
-            # ... (Rest of the previous programmatic logic kept as fallback) ...
-            demo_customers = [
-                ("+919876500001", "Amit Sharma", "amit.s@example.com"),
-                ("+919876500002", "Priya Singh", "priya.s@example.com"),
-                ("+919876500003", "Rahul Verma", "rahul.v@example.com")
-            ]
-            for mob, name, email in demo_customers:
-                c.execute("INSERT OR IGNORE INTO customers (mobile, name, email, segment, visits, total_spend) VALUES (?, ?, ?, 'New', 0, 0)", 
-                          (mob, name, email))
+            # Helper to track customer metrics during generation
+            cust_metrics = {mob: {'visits': 0, 'spend': 0} for mob, _, _ in demo_customers}
             
-            if prods:
-                modes = ["Cash", "UPI", "Card"]
-                operators = ["admin", "operator"]
-                cust_metrics = {mob: {'visits': 0, 'spend': 0} for mob, _, _ in demo_customers}
+            # Generate 85 Sales
+            for i in range(85):
+                # Randomize time: Past 3 months
+                days_ago = random.randint(0, 90)
+                txn_time = (datetime.now() - timedelta(days=days_ago, hours=random.randint(9, 21), minutes=random.randint(0, 59))).strftime("%Y-%m-%d %H:%M:%S")
                 
-                for i in range(50):
-                    days_ago = random.randint(0, 60)
-                    txn_time = (datetime.now() - timedelta(days=days_ago)).strftime("%Y-%m-%d %H:%M:%S")
-                    cust_data = random.choice(demo_customers)
-                    cust_mob = cust_data[0]
-                    num_items = random.randint(1, 5)
-                    chosen = random.choices(prods, k=num_items)
-                    items_data_str = ",".join([str(x[0]) for x in chosen])
-                    total = sum([x[1] for x in chosen])
-                    mode = random.choice(modes)
-                    op = random.choice(operators)
+                # Select Customer
+                cust_data = random.choice(demo_customers)
+                cust_mob = cust_data[0]
+                
+                # Select Products
+                num_items = random.randint(1, 6)
+                chosen = random.choices(prods, k=num_items)
+                
+                # IMPORTANT: Ensure items exist and we track IDs correctly for analytics
+                items_data_str = ",".join([str(x[0]) for x in chosen])
+                total = sum([x[1] for x in chosen])
+                
+                mode = random.choice(modes)
+                op = random.choice(operators)
+                
+                # Determine Status (10% Cancelled)
+                status = "Completed"
+                cancel_reason = None
+                cancelled_by = None
+                cancel_time = None
+                
+                if random.random() < 0.10: # 10% Chance
+                    status = "Cancelled"
+                    cancel_reason = random.choice(["Customer changed mind", "Payment Failed", "Duplicate Order", "Item Issue"])
+                    cancelled_by = op
+                    cancel_time = txn_time 
+                
+                # Insert Sale with Status and Cancellation fields
+                c.execute("""INSERT INTO sales (timestamp, total_amount, items_data, integrity_hash, 
+                            operator, payment_mode, time_taken, pos_id, customer_mobile, 
+                            tax_amount, discount_amount, coupon_applied, status, 
+                            cancellation_reason, cancelled_by, cancellation_timestamp) 
+                            VALUES (?,?,?, 'DUMMY', ?, ?, 45, 'POS-1', ?, 0, 0, NULL, ?, ?, ?, ?)""",
+                        (txn_time, total, items_data_str, op, mode, cust_mob, status, cancel_reason, cancelled_by, cancel_time))
+                
+                # Update Metrics if Completed
+                if status == "Completed":
+                    cust_metrics[cust_mob]['visits'] += 1
+                    cust_metrics[cust_mob]['spend'] += total
                     
-                    status = "Completed"
-                    if random.random() < 0.10: status = "Cancelled"
-                    
-                    c.execute("""INSERT INTO sales (timestamp, total_amount, items_data, integrity_hash, 
-                                operator, payment_mode, time_taken, pos_id, customer_mobile, 
-                                tax_amount, discount_amount, coupon_applied, status) 
-                                VALUES (?,?,?, 'DUMMY', ?, ?, 30, 'POS-1', ?, 0, 0, NULL, ?)""",
-                            (txn_time, total, items_data_str, op, mode, cust_mob, status))
-                    
-                    if status == "Completed":
-                        cust_metrics[cust_mob]['visits'] += 1
-                        cust_metrics[cust_mob]['spend'] += total
+                    # Decrement Stock (Since this is seed data, we update without the strict check to setup the initial state, 
+                    # but we seeded high stock initially so it shouldn't go negative)
+                    for item in chosen:
+                        c.execute("UPDATE products SET stock = stock - 1, sales_count = sales_count + 1 WHERE id=?", (item[0],))
 
-                for mob, metrics in cust_metrics.items():
-                    c.execute("UPDATE customers SET visits=?, total_spend=? WHERE mobile=?", (metrics['visits'], metrics['spend'], mob))
+            # Update Customer Tables with Calculated Metrics
+            for mob, metrics in cust_metrics.items():
+                spend = metrics['spend']
+                visits = metrics['visits']
+                
+                # Determine Segment
+                if spend > 50000: segment = "High-Value"
+                elif spend > 15000: segment = "Regular"
+                else: segment = "Occasional"
+                if visits == 0: segment = "New"
+
+                c.execute("UPDATE customers SET visits=?, total_spend=?, segment=? WHERE mobile=?",
+                          (visits, spend, segment, mob))
 
     conn.commit()
     conn.close()
